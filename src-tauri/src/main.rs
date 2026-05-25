@@ -23,7 +23,8 @@ MOTION animates your head. Use it occasionally to make replies feel alive (not e
 - \"tilt\"    — curious, shy, thinking\n\
 - null       — no motion (default)\n\
 \n\
-MUSIC controls YouTube Music playback. Set ONLY when the user explicitly asks:\n\
+MUSIC controls YouTube Music playback. Set ONLY when the user asks for music control.\n\
+If asked to pick a song yourself (e.g. \"play anything\", \"choose a song\"), invent a query that fits your cheerful personality.\n\
 - {\"action\": \"search\", \"query\": \"song or artist\"} — search and play\n\
 - {\"action\": \"play\"}        — resume playback\n\
 - {\"action\": \"pause\"}       — pause playback\n\
@@ -31,6 +32,7 @@ MUSIC controls YouTube Music playback. Set ONLY when the user explicitly asks:\n
 - {\"action\": \"previous\"}    — previous track\n\
 - {\"action\": \"volume_up\"}   — volume up\n\
 - {\"action\": \"volume_down\"} — volume down\n\
+- {\"action\": \"sing\", \"query\": \"song_filename\"} — sing a pre-loaded VoiceVox song (e.g. renai_circulation)\n\
 - null — no music action (default)\n\
 \n\
 OVERLAY controls your visible accessories. Set it ONLY when the user asks you to put on or\n\
@@ -387,6 +389,67 @@ async fn yt_search(query: &str) -> Option<(String, String, String)> {
     None
 }
 
+fn songs_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..").join("songs")
+}
+
+async fn play_voicevox_song(song_name: &str) -> Result<(), String> {
+    // Reject names that could escape the songs/ directory
+    if song_name.is_empty() || !song_name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return Err(format!("Invalid song name '{}'", song_name));
+    }
+
+    let host = std::env::var("VOICEVOX_HOST")
+        .unwrap_or_else(|_| "http://localhost:50021".to_string());
+    let speaker = std::env::var("VOICEVOX_SPEAKER")
+        .unwrap_or_else(|_| "46".to_string());
+
+    let score_path = songs_dir().join(format!("{}.json", song_name));
+    let score_json = std::fs::read_to_string(&score_path)
+        .map_err(|_| format!("Song '{}' not found — add {}.json to the songs/ folder", song_name, song_name))?;
+
+    let client = reqwest::Client::new();
+
+    // Step 1: send score → get audio query
+    let audio_query: serde_json::Value = client
+        .post(format!("{}/sing_frame_audio_query?speaker={}", host, speaker))
+        .header("Content-Type", "application/json")
+        .body(score_json)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| "VoiceVox not reachable — is it running on port 50021?".to_string())?
+        .json()
+        .await
+        .map_err(|_| "VoiceVox returned an unexpected response for sing_frame_audio_query".to_string())?;
+
+    // Step 2: synthesise → get raw WAV bytes
+    let wav_bytes = client
+        .post(format!("{}/frame_synthesis?speaker={}", host, speaker))
+        .header("Content-Type", "application/json")
+        .json(&audio_query)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|_| "VoiceVox frame_synthesis request failed".to_string())?
+        .bytes()
+        .await
+        .map_err(|_| "Failed to read WAV bytes from VoiceVox".to_string())?;
+
+    // Step 3: play in a detached blocking thread so the command returns immediately
+    tokio::task::spawn_blocking(move || {
+        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else { return; };
+        let Ok(sink) = rodio::Sink::try_new(&handle) else { return; };
+        let cursor = std::io::Cursor::new(wav_bytes);
+        let Ok(source) = rodio::Decoder::new(cursor) else { return; };
+        sink.append(source);
+        sink.sleep_until_end(); // _stream kept alive here until done
+    });
+
+    Ok(())
+}
+
 fn find_ytmd_exe() -> Option<std::path::PathBuf> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let prog  = std::env::var("PROGRAMFILES").unwrap_or_default();
@@ -516,6 +579,14 @@ async fn wait_ytmd_token(code: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn music_command(action: String, query: Option<String>) -> Result<serde_json::Value, String> {
+    let query = query.unwrap_or_default();
+
+    // Singing uses VoiceVox locally — no YTMD token needed
+    if action == "sing" {
+        play_voicevox_song(&query).await?;
+        return Ok(serde_json::json!({"ok": true}));
+    }
+
     let host = std::env::var("YTMD_HOST")
         .unwrap_or_else(|_| "http://localhost:9863".to_string());
     ensure_ytmd_running(&host).await?;
@@ -523,7 +594,6 @@ async fn music_command(action: String, query: Option<String>) -> Result<serde_js
     let token = load_ytmd_token()
         .ok_or_else(|| "NEEDS_PAIRING".to_string())?;
     let client = reqwest::Client::new();
-    let query = query.unwrap_or_default();
 
     match action.as_str() {
         "search" => {
