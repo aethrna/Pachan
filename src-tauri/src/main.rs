@@ -24,13 +24,13 @@ MOTION animates your head. Use it occasionally to make replies feel alive (not e
 - null       — no motion (default)\n\
 \n\
 MUSIC controls YouTube Music playback. Set ONLY when the user explicitly asks:\n\
-- {{\"action\": \"search\", \"query\": \"song or artist\"}} — search and play\n\
-- {{\"action\": \"play\"}}        — resume playback\n\
-- {{\"action\": \"pause\"}}       — pause playback\n\
-- {{\"action\": \"next\"}}        — skip track\n\
-- {{\"action\": \"previous\"}}    — previous track\n\
-- {{\"action\": \"volume_up\"}}   — volume up\n\
-- {{\"action\": \"volume_down\"}} — volume down\n\
+- {\"action\": \"search\", \"query\": \"song or artist\"} — search and play\n\
+- {\"action\": \"play\"}        — resume playback\n\
+- {\"action\": \"pause\"}       — pause playback\n\
+- {\"action\": \"next\"}        — skip track\n\
+- {\"action\": \"previous\"}    — previous track\n\
+- {\"action\": \"volume_up\"}   — volume up\n\
+- {\"action\": \"volume_down\"} — volume down\n\
 - null — no music action (default)\n\
 \n\
 OVERLAY controls your visible accessories. Set it ONLY when the user asks you to put on or\n\
