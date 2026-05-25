@@ -531,7 +531,7 @@ async fn music_command(action: String, query: String) -> Result<serde_json::Valu
             let url = format!("https://music.youtube.com/watch?v={}", vid);
             let res = client.post(format!("{}/api/v1/command", host))
                 .header("Authorization", format!("Bearer {}", token))
-                .json(&serde_json::json!({"command": "navigate", "data": url}))
+                .json(&serde_json::json!({"command": "navigate", "value": url}))
                 .timeout(std::time::Duration::from_secs(2))
                 .send()
                 .await

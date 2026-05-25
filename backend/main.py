@@ -33,7 +33,7 @@ OLLAMA_HOST    = os.getenv("OLLAMA_HOST")
 OLLAMA_KEY     = os.getenv("OLLAMA_API_KEY", "")
 CHAT_MODEL     = os.getenv("OLLAMA_MODEL")
 VISION_MODEL   = os.getenv("OLLAMA_VISION_MODEL", "")
-YTMD_HOST      = os.getenv("YTMD_HOST", "http://localhost:26538")
+YTMD_HOST      = os.getenv("YTMD_HOST", "http://localhost:9863")
 
 SYSTEM_PROMPT = """You are Pachan, a cheerful anime girl avatar based on Pachirisu.
 You are cute, energetic, and sweet. Keep replies SHORT — 1 to 2 sentences max.
@@ -243,12 +243,35 @@ async def get_settings():
 
 # ── YouTube Music Desktop App integration ─────────────────────────────────────
 
+YTMD_TOKEN_PATH = Path(__file__).parent.parent / "ytmd_token.json"
+
+def _load_ytmd_token() -> str | None:
+    try:
+        return json.loads(YTMD_TOKEN_PATH.read_text()).get("token")
+    except Exception:
+        return None
+
+def _ytmd_headers() -> dict:
+    token = _load_ytmd_token()
+    if not token:
+        raise HTTPException(401, "NEEDS_PAIRING")
+    return {"Authorization": f"Bearer {token}"}
+
+
 @app.get("/music/status")
 async def music_status():
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(f"{YTMD_HOST}/query", timeout=2.0)
+            res = await client.get(
+                f"{YTMD_HOST}/api/v1/state",
+                headers=_ytmd_headers(),
+                timeout=2.0,
+            )
+            if res.status_code == 401:
+                return {"error": "NEEDS_PAIRING"}
             return res.json()
+    except HTTPException:
+        return {"error": "NEEDS_PAIRING"}
     except Exception:
         return {"error": "YTMD not running"}
 
@@ -283,6 +306,8 @@ async def music_command(req: MusicCommandRequest):
         "volume_down": "volumeDown",
     }
 
+    headers = _ytmd_headers()
+
     async with httpx.AsyncClient() as client:
 
         # ── Search and play ────────────────────────────────────────────────
@@ -292,8 +317,16 @@ async def music_command(req: MusicCommandRequest):
                 raise HTTPException(404, "No results found")
             url = f"https://music.youtube.com/watch?v={hit['id']}"
             try:
-                await client.post(f"{YTMD_HOST}/command",
-                    json={"command": "navigate", "value": url}, timeout=2.0)
+                res = await client.post(
+                    f"{YTMD_HOST}/api/v1/command",
+                    headers=headers,
+                    json={"command": "navigate", "value": url},
+                    timeout=2.0,
+                )
+                if res.status_code == 401:
+                    raise HTTPException(401, "NEEDS_PAIRING")
+            except HTTPException:
+                raise
             except Exception:
                 raise HTTPException(502, "YTMD not reachable")
             return {"ok": True, "title": hit["title"], "author": hit["author"]}
@@ -301,13 +334,24 @@ async def music_command(req: MusicCommandRequest):
         # ── Play / pause (state-aware toggle) ─────────────────────────────
         if req.action in ("play", "pause"):
             try:
-                status = (await client.get(f"{YTMD_HOST}/query", timeout=2.0)).json()
+                status_res = await client.get(
+                    f"{YTMD_HOST}/api/v1/state", headers=headers, timeout=2.0
+                )
+                if status_res.status_code == 401:
+                    raise HTTPException(401, "NEEDS_PAIRING")
+                status = status_res.json()
                 is_paused = status.get("player", {}).get("isPaused", True)
                 needs_toggle = (req.action == "play" and is_paused) or \
                                (req.action == "pause" and not is_paused)
                 if needs_toggle:
-                    await client.post(f"{YTMD_HOST}/command",
-                        json={"command": "playPause"}, timeout=2.0)
+                    await client.post(
+                        f"{YTMD_HOST}/api/v1/command",
+                        headers=headers,
+                        json={"command": "playPause"},
+                        timeout=2.0,
+                    )
+            except HTTPException:
+                raise
             except Exception:
                 raise HTTPException(502, "YTMD not reachable")
             return {"ok": True}
@@ -317,8 +361,16 @@ async def music_command(req: MusicCommandRequest):
         if not ytmd_cmd:
             raise HTTPException(400, f"Unknown action: {req.action}")
         try:
-            await client.post(f"{YTMD_HOST}/command",
-                json={"command": ytmd_cmd}, timeout=2.0)
+            res = await client.post(
+                f"{YTMD_HOST}/api/v1/command",
+                headers=headers,
+                json={"command": ytmd_cmd},
+                timeout=2.0,
+            )
+            if res.status_code == 401:
+                raise HTTPException(401, "NEEDS_PAIRING")
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(502, "YTMD not reachable")
         return {"ok": True}
