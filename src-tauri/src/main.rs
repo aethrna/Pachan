@@ -320,7 +320,7 @@ async fn music_status() -> serde_json::Value {
     let token = load_ytmd_token().unwrap_or_default();
     match reqwest::Client::new()
         .get(format!("{}/api/v1/state", host))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", token)
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
@@ -445,7 +445,7 @@ async fn ensure_ytmd_running(host: &str) -> Result<(), String> {
 
 async fn ytmd_send(client: &reqwest::Client, host: &str, cmd: &str, token: &str) -> Result<serde_json::Value, String> {
     let res = client.post(format!("{}/api/v1/command", host))
-        .header("Authorization", format!("Bearer {}", token))
+        .header("Authorization", token)
         .json(&serde_json::json!({"command": cmd}))
         .timeout(std::time::Duration::from_secs(2))
         .send()
@@ -530,7 +530,7 @@ async fn music_command(action: String, query: Option<String>) -> Result<serde_js
             let (vid, title, author) = yt_search(&query).await
                 .ok_or_else(|| "No results found".to_string())?;
             let res = client.post(format!("{}/api/v1/command", host))
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", &token)
                 .json(&serde_json::json!({"command": "changeVideo", "data": {"videoId": vid}}))
                 .timeout(std::time::Duration::from_secs(2))
                 .send()
@@ -541,7 +541,7 @@ async fn music_command(action: String, query: Option<String>) -> Result<serde_js
         }
         "play" | "pause" => {
             let status_res = client.get(format!("{}/api/v1/state", host))
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", &token)
                 .timeout(std::time::Duration::from_secs(2))
                 .send()
                 .await
