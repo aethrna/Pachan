@@ -1,0 +1,36 @@
+# ── Live2D model assets (hosted separately) ───────────────────────────────────
+Pachan_1.1/
+frontend/model/
+frontend/overlays/
+
+# ── Secrets & personal data ───────────────────────────────────────────────────
+.env
+ytmd_token.json
+pachan_history.json
+user_profile.json
+
+# ── Rust / Tauri build output ─────────────────────────────────────────────────
+src-tauri/target/
+*.pdb
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# ── Node / Electron ───────────────────────────────────────────────────────────
+node_modules/
+dist/
+out/
+
+# ── OS & editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+.claude/

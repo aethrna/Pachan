@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pachan</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 400px;
+      height: 600px;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Segoe UI', sans-serif;
+    }
+
+    #canvas-wrap {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #chat-ui {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      padding: 10px 12px 12px;
+      background: linear-gradient(to bottom, rgba(10,8,20,0) 0%, rgba(10,8,20,0.85) 30%);
+    }
+
+    #speech-bubble {
+      min-height: 44px;
+      margin-bottom: 8px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,0.12);
+      border-radius: 12px;
+      color: #fff;
+      font-size: 13px;
+      line-height: 1.5;
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(255,255,255,0.15);
+      display: none;
+    }
+
+    #speech-bubble.visible { display: block; }
+
+    #input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    #msg-input {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,180,220,0.4);
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font-size: 13px;
+      outline: none;
+      backdrop-filter: blur(4px);
+      transition: border-color 0.2s;
+    }
+
+    #msg-input::placeholder { color: rgba(255,255,255,0.4); }
+    #msg-input:focus { border-color: rgba(255,160,200,0.8); }
+
+    #send-btn {
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: none;
+      background: linear-gradient(135deg, #ff80c0, #c070ff);
+      color: white;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+
+    #send-btn:hover { opacity: 0.9; }
+    #send-btn:active { transform: scale(0.96); }
+    #send-btn:disabled { opacity: 0.4; cursor: default; }
+
+    #mic-btn {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(255,255,255,0.12);
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    #mic-btn:hover { background: rgba(255,255,255,0.22); }
+    #mic-btn.listening {
+      background: rgba(255, 50, 50, 0.75);
+      animation: mic-pulse 1s ease-in-out infinite;
+    }
+    #mic-btn.processing { background: rgba(255,160,50,0.6); }
+    #mic-btn:disabled { opacity: 0.3; cursor: default; }
+
+    @keyframes mic-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,50,50,0.5); }
+      50%       { box-shadow: 0 0 0 10px rgba(255,50,50,0); }
+    }
+
+    /* Drag handle for Electron overlay — invisible but grabbable */
+    #drag-handle {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 32px;
+      -webkit-app-region: drag;
+      cursor: grab;
+      display: none; /* shown only in overlay mode */
+    }
+    body.overlay #drag-handle { display: block; }
+    body.overlay #canvas-wrap { -webkit-app-region: drag; cursor: grab; }
+    body.overlay #chat-ui     { -webkit-app-region: no-drag; }
+
+    /* Listening ripple on the whole window edge */
+    body.listening::after {
+      content: '';
+      position: fixed; inset: 0;
+      border: 2px solid rgba(255,50,50,0.6);
+      border-radius: 4px;
+      pointer-events: none;
+      animation: border-pulse 1s ease-in-out infinite;
+    }
+    @keyframes border-pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    #status {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      font-size: 11px;
+      color: rgba(255,255,255,0.4);
+    }
+
+    #scale-hint {
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.3);
+    }
+
+    canvas { display: block; }
+
+    #now-playing {
+      font-size: 10px;
+      color: rgba(255,255,255,0.22);
+      padding: 0 12px 5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: none;
+      letter-spacing: 0.02em;
+    }
+    #now-playing.active { display: block; }
+
+    /* ── Settings panel ── */
+    #settings-btn {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.22);
+      font-size: 13px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    #settings-btn:hover { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.7); }
+    #settings-btn.active { background: rgba(255,100,180,0.22); color: rgba(255,170,215,0.9); }
+
+    #settings-panel {
+      background: rgba(10,8,20,0.93);
+      border: 1px solid rgba(255,180,220,0.16);
+      border-radius: 12px;
+      padding: 10px 13px 8px;
+      margin-bottom: 8px;
+      backdrop-filter: blur(8px);
+      display: none;
+    }
+    #settings-panel.open { display: block; }
+
+    .sp-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 9px;
+    }
+    .sp-title {
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(255,155,205,0.8);
+    }
+    .sp-model {
+      font-size: 9px;
+      color: rgba(255,255,255,0.22);
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sp-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 6px;
+    }
+    .sp-label {
+      color: rgba(255,255,255,0.45);
+      font-size: 11px;
+      width: 64px;
+      flex-shrink: 0;
+    }
+    .sp-row input[type="range"] {
+      flex: 1;
+      height: 3px;
+      accent-color: #ff80c0;
+      cursor: pointer;
+    }
+    .sp-val {
+      color: rgba(255,255,255,0.38);
+      font-size: 10px;
+      width: 24px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .sp-row select {
+      flex: 1;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,180,220,0.22);
+      border-radius: 6px;
+      color: rgba(255,255,255,0.7);
+      padding: 3px 6px;
+      font-size: 10px;
+      outline: none;
+    }
+    .sp-toggle {
+      position: relative;
+      width: 30px; height: 15px;
+      flex-shrink: 0;
+    }
+    .sp-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .sp-slider {
+      position: absolute; inset: 0;
+      background: rgba(255,255,255,0.13);
+      border-radius: 15px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .sp-slider::before {
+      content: '';
+      position: absolute;
+      left: 2px; top: 2px;
+      width: 11px; height: 11px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.55);
+      transition: transform 0.2s, background 0.2s;
+    }
+    .sp-toggle input:checked + .sp-slider { background: rgba(255,90,170,0.55); }
+    .sp-toggle input:checked + .sp-slider::before { transform: translateX(15px); background: #fff; }
+
+  </style>
+</head>
+<body>
+  <div id="drag-handle"></div>
+  <div id="canvas-wrap"></div>
+
+
+  <div id="status">loading...</div>
+  <div id="scale-hint">scroll to resize</div>
+
+  <div id="chat-ui">
+    <div id="now-playing"></div>
+    <div id="speech-bubble"></div>
+
+    <div id="settings-panel">
+      <div class="sp-head">
+        <span class="sp-title">Settings</span>
+        <span class="sp-model" id="sp-model-name"></span>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Streaming</span>
+        <label class="sp-toggle"><input type="checkbox" id="sp-streaming" checked><span class="sp-slider"></span></label>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Voice</span>
+        <select id="sp-voice"></select>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Speed</span>
+        <input type="range" id="sp-rate" min="0.5" max="2" step="0.1" value="1.1">
+        <span class="sp-val" id="sp-rate-val">1.1</span>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Pitch</span>
+        <input type="range" id="sp-pitch" min="0.5" max="2" step="0.1" value="1.5">
+        <span class="sp-val" id="sp-pitch-val">1.5</span>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Proactive</span>
+        <label class="sp-toggle"><input type="checkbox" id="sp-proactive" checked><span class="sp-slider"></span></label>
+        <input type="range" id="sp-interval" min="2" max="30" step="1" value="5" style="flex:1">
+        <span class="sp-val" id="sp-interval-val">5m</span>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Vision peek</span>
+        <label class="sp-toggle"><input type="checkbox" id="sp-vision"><span class="sp-slider"></span></label>
+        <input type="range" id="sp-vision-ivl" min="5" max="60" step="5" value="15" style="flex:1">
+        <span class="sp-val" id="sp-vision-val">15m</span>
+      </div>
+      <div class="sp-row">
+        <span class="sp-label">Music react</span>
+        <label class="sp-toggle"><input type="checkbox" id="sp-music-react" checked><span class="sp-slider"></span></label>
+      </div>
+    </div>
+
+    <div id="input-row">
+      <button id="mic-btn" disabled title="Click to speak  (or hold Space)">🎤</button>
+      <input id="msg-input" type="text" placeholder="Say something to Pachan..." autocomplete="off" />
+      <button id="send-btn" disabled>Send</button>
+      <button id="settings-btn" title="Settings">⚙</button>
+    </div>
+  </div>
+
+  <!-- Cubism 4 core (required for .moc3 models) -->
+  <script>
+    // Apply overlay class immediately so drag regions activate even if model load fails
+    if (window.__TAURI__ || new URLSearchParams(location.search).get('overlay') === '1') {
+      document.body.classList.add('overlay');
+    }
+  </script>
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <!-- PixiJS v6 -->
+  <script src="https://unpkg.com/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <!-- pixi-live2d-display -->
+  <script src="https://unpkg.com/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+
+  <script>
+  (async () => {
+    const MODEL_URL = './model/pachirisu%20anime%20girl%20-%20top%20half.model3.json';
+
+    // ── Parameter targets per emotion ──────────────────────────────────────
+    const EMOTIONS = {
+      neutral: {
+        ParamEyeLOpen: 1.0, ParamEyeROpen: 1.0,
+        ParamEyeLSmile: 0.0, ParamEyeRSmile: 0.0,
+        ParamMouthForm: 0.0,  ParamMouthOpenY: 0.0,
+        ParamBrowLY: 0.0,    ParamBrowRY: 0.0,
+        ParamBrowLAngle: 0.0, ParamBrowRAngle: 0.0,
+        ParamBrowLForm: 0.0,  ParamBrowRForm: 0.0,
+        ParamBrowLX: 0.0,    ParamBrowRX: 0.0,
+        ParamCheek: 0.0,
+      },
+      happy: {
+        ParamEyeLOpen: 0.5, ParamEyeROpen: 0.5,
+        ParamEyeLSmile: 1.0, ParamEyeRSmile: 1.0,
+        ParamMouthForm: 1.0,  ParamMouthOpenY: 0.0,
+        ParamBrowLY: 0.4,    ParamBrowRY: 0.4,
+        ParamBrowLAngle: 0.0, ParamBrowRAngle: 0.0,
+        ParamBrowLForm: 0.5,  ParamBrowRForm: 0.5,
+        ParamBrowLX: 0.0,    ParamBrowRX: 0.0,
+        ParamCheek: 0.6,
+      },
+      sad: {
+        ParamEyeLOpen: 0.75, ParamEyeROpen: 0.75,
+        ParamEyeLSmile: 0.0, ParamEyeRSmile: 0.0,
+        ParamMouthForm: -1.0, ParamMouthOpenY: 0.0,
+        ParamBrowLY: -0.3,   ParamBrowRY: -0.3,
+        ParamBrowLAngle: -0.8, ParamBrowRAngle: 0.8,
+        ParamBrowLForm: -0.5, ParamBrowRForm: -0.5,
+        ParamBrowLX: 0.0,    ParamBrowRX: 0.0,
+        ParamCheek: 0.0,
+      },
+      surprised: {
+        ParamEyeLOpen: 1.3,  ParamEyeROpen: 1.3,
+        ParamEyeLSmile: 0.0, ParamEyeRSmile: 0.0,
+        ParamMouthForm: -0.1,
+        ParamMouthOpenY: 0.35,
+        ParamBrowLY: 0.65,   ParamBrowRY: 0.65,
+        ParamBrowLAngle: 0.2, ParamBrowRAngle: -0.2,
+        ParamBrowLForm: 0.2,  ParamBrowRForm: 0.2,
+        ParamBrowLX: 0.1,    ParamBrowRX: -0.1,
+        ParamCheek: 0.0,
+      },
+      angry: {
+        ParamEyeLOpen: 0.85, ParamEyeROpen: 0.85,
+        ParamEyeLSmile: 0.0, ParamEyeRSmile: 0.0,
+        ParamMouthForm: -0.6,
+        ParamBrowLY: -0.4,   ParamBrowRY: -0.4,
+        ParamBrowLAngle: -1.0, ParamBrowRAngle: 1.0,
+        ParamBrowLForm: -0.8, ParamBrowRForm: -0.8,
+        ParamBrowLX: -0.3,   ParamBrowRX: 0.3,
+        ParamCheek: 0.0,
+      },
+      shy: {
+        ParamEyeLOpen: 0.7,  ParamEyeROpen: 0.7,
+        ParamEyeLSmile: 0.3, ParamEyeRSmile: 0.3,
+        ParamMouthForm: 0.35, ParamMouthOpenY: 0.0,
+        ParamBrowLY: 0.15,   ParamBrowRY: 0.15,
+        ParamBrowLAngle: 0.0, ParamBrowRAngle: 0.0,
+        ParamBrowLForm: 0.2,  ParamBrowRForm: 0.2,
+        ParamBrowLX: 0.15,   ParamBrowRX: -0.15,
+        ParamCheek: 0.6,
+      },
+      bored: {
+        ParamEyeLOpen: 0.72, ParamEyeROpen: 0.72,
+        ParamEyeLSmile: 0.0, ParamEyeRSmile: 0.0,
+        ParamMouthForm: -0.25, ParamMouthOpenY: 0.0,
+        ParamBrowLY: -0.15,  ParamBrowRY: -0.15,
+        ParamBrowLAngle: 0.0, ParamBrowRAngle: 0.0,
+        ParamBrowLForm: -0.2, ParamBrowRForm: -0.2,
+        ParamBrowLX: 0.0,    ParamBrowRX: 0.0,
+        ParamCheek: 0.0,
+      },
+      asleep: {
+        ParamEyeLOpen: 0.0,  ParamEyeROpen: 0.0,
+        ParamEyeLSmile: 0.15, ParamEyeRSmile: 0.15,
+        ParamMouthForm: 0.05, ParamMouthOpenY: 0.0,
+        ParamBrowLY: 0.0,    ParamBrowRY: 0.0,
+        ParamBrowLAngle: 0.0, ParamBrowRAngle: 0.0,
+        ParamBrowLForm: 0.0,  ParamBrowRForm: 0.0,
+        ParamBrowLX: 0.1,    ParamBrowRX: -0.1,
+        ParamCheek: 0.0,
+      },
+    };
+
+    // ── State ──────────────────────────────────────────────────────────────
+    let targetEmotion = 'neutral';
+    let currentParams = { ...EMOTIONS.neutral };
+
+    // Blink state machine
+    const blink = { phase: 'open', timer: 0, next: rnd(3, 6) };
+
+    // Talking / mouth
+    let isTalking = false;
+
+    // Head idle offsets
+    let idleAngleX = 0, idleAngleY = 0, idleAngleXTarget = 0, idleAngleYTarget = 0;
+    let idleTimer = 0, idleInterval = rnd(5, 10);
+
+    // Idle / sleep state
+    let lastInteractionTime = Date.now();
+    let idlePhase = 'active'; // 'active' | 'bored' | 'sleepy' | 'asleep'
+    let chatEmotion = null;   // set by LLM response, cleared after 2 s
+
+    // Proactive messages
+    let lastProactiveTime = Date.now();
+    let PROACTIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+    // Scale control (scroll to resize)
+    let modelScale = 0.28;
+
+    // ── Settings ──────────────────────────────────────────────────────────
+    const SETTINGS_KEY = 'pachan_settings';
+    let settings = {
+      streaming: true,
+      ttsRate: 1.1,
+      ttsPitch: 1.5,
+      ttsVoice: '',
+      proactive: true,
+      proactiveInterval: 5,
+      vision: false,
+      visionInterval: 15,
+      musicReactions: true,
+    };
+    function loadSettings() {
+      try {
+        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+        Object.assign(settings, s);
+        PROACTIVE_INTERVAL = settings.proactiveInterval * 60 * 1000;
+      } catch (_) {}
+    }
+    function saveSettings() {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+    loadSettings();
+
+    function rnd(min, max) { return min + Math.random() * (max - min); }
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
+
+    function setParam(coreModel, id, val) {
+      try { coreModel.setParameterValueById(id, val); } catch (_) {}
+    }
+
+    // ── Motions ───────────────────────────────────────────────────────────
+    const MOTIONS = {
+      nod: [
+        { t: 0,    ax: 0, ay: 0,   az: 0 },
+        { t: 0.16, ax: 0, ay: -14, az: 0 },
+        { t: 0.34, ax: 0, ay: 5,   az: 0 },
+        { t: 0.5,  ax: 0, ay: -9,  az: 0 },
+        { t: 0.66, ax: 0, ay: 0,   az: 0 },
+      ],
+      shake: [
+        { t: 0,    ax: 0,   ay: 0, az: 0 },
+        { t: 0.12, ax: -16, ay: 0, az: 2 },
+        { t: 0.28, ax: 16,  ay: 0, az: -2 },
+        { t: 0.44, ax: -12, ay: 0, az: 1 },
+        { t: 0.58, ax: 10,  ay: 0, az: -1 },
+        { t: 0.72, ax: 0,   ay: 0, az: 0 },
+      ],
+      excited: [
+        { t: 0,    ax: 0,  ay: 0,  az: 0,  bx: 0 },
+        { t: 0.08, ax: 5,  ay: -8, az: 3,  bx: 2 },
+        { t: 0.18, ax: -5, ay: 2,  az: -3, bx: -2 },
+        { t: 0.28, ax: 6,  ay: -9, az: 4,  bx: 2 },
+        { t: 0.38, ax: -6, ay: 2,  az: -4, bx: -2 },
+        { t: 0.48, ax: 3,  ay: -5, az: 2,  bx: 1 },
+        { t: 0.6,  ax: 0,  ay: 0,  az: 0,  bx: 0 },
+      ],
+      tilt: [
+        { t: 0,    ax: 0, ay: 0, az: 0 },
+        { t: 0.25, ax: 0, ay: 0, az: 18 },
+        { t: 0.9,  ax: 0, ay: 0, az: 18 },
+        { t: 1.15, ax: 0, ay: 0, az: 0 },
+      ],
+    };
+
+    let activeMotion = null;
+
+    function playMotion(name) {
+      const frames = MOTIONS[name];
+      if (!frames) return;
+      activeMotion = { frames, t0: performance.now() / 1000 };
+    }
+
+    function tickMotion(core, dt) {
+      if (!activeMotion) return false;
+      const elapsed = performance.now() / 1000 - activeMotion.t0;
+      const { frames } = activeMotion;
+      const last = frames[frames.length - 1];
+      if (elapsed >= last.t) { activeMotion = null; return false; }
+
+      let prev = frames[0], next = frames[frames.length - 1];
+      for (let i = 1; i < frames.length; i++) {
+        if (frames[i].t >= elapsed) { prev = frames[i - 1]; next = frames[i]; break; }
+      }
+
+      const a = (elapsed - prev.t) / (next.t - prev.t);
+      const e = a < 0.5 ? 2 * a * a : -1 + (4 - 2 * a) * a; // ease in-out
+
+      setParam(core, 'ParamAngleX',     lerp(prev.ax ?? 0, next.ax ?? 0, e));
+      setParam(core, 'ParamAngleY',     lerp(prev.ay ?? 0, next.ay ?? 0, e));
+      setParam(core, 'ParamAngleZ',     lerp(prev.az ?? 0, next.az ?? 0, e));
+      setParam(core, 'ParamBodyAngleX', lerp(prev.bx ?? 0, next.bx ?? 0, e));
+      return true;
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────
+    const app = new PIXI.Application({
+      width: 400,
+      height: 600,
+      backgroundAlpha: 0,
+      antialias: true,
+      autoDensity: true,
+      resolution: window.devicePixelRatio || 1,
+    });
+
+    document.getElementById('canvas-wrap').appendChild(app.view);
+    document.getElementById('status').textContent = 'loading model...';
+
+    let model;
+    try {
+      model = await PIXI.live2d.Live2DModel.from(MODEL_URL, { autoInteract: false });
+    } catch (e) {
+      document.getElementById('status').textContent = 'model load failed: ' + e.message;
+      console.error(e);
+      return;
+    }
+
+    // ── Overlay sprites ───────────────────────────────────────────────────
+    let OVERLAY_SCALE    = 1.01;
+    let OVERLAY_Y        = 23;
+    let CONTROLLER_SCALE = 0.49;
+    let CONTROLLER_X     = 200;
+    let CONTROLLER_Y     = 653;
+    let CONTROLLER_ARM_ROW = 900;
+
+    const backSprite       = PIXI.Sprite.from('overlays/Back.png');
+    const frontSprite      = PIXI.Sprite.from('overlays/Front.png');
+    const controllerSprite = PIXI.Sprite.from('overlays/Controller.png');
+
+    // Anchors fixed once; position/scale driven by applyOverlayParams()
+    [backSprite, frontSprite].forEach(s => { s.anchor.set(0.5, 0.5); s.x = 200; });
+    controllerSprite.anchor.set(0.5, 1.0);
+    controllerSprite.visible = false;
+
+    const controllerMask = new PIXI.Graphics();
+    function updateControllerMask() {
+      const s = modelScale * CONTROLLER_SCALE;
+      const spriteTop = CONTROLLER_Y - 4320 * s;
+      const cropY = Math.max(0, spriteTop + CONTROLLER_ARM_ROW * s);
+      const halfW = 7680 * s / 2;
+      controllerMask.clear();
+      controllerMask.beginFill(0xffffff);
+      controllerMask.drawRect(CONTROLLER_X - halfW, cropY, halfW * 2, 600 - cropY);
+      controllerMask.endFill();
+    }
+    controllerSprite.mask = controllerMask;
+
+    let costumeVisible    = false;
+    let controllerVisible = false;
+
+    backSprite.visible  = false;
+    frontSprite.visible = false;
+
+    function handleOverlay(cmd) {
+      if (cmd === 'costume') {
+        costumeVisible = !costumeVisible;
+        backSprite.visible  = costumeVisible;
+        frontSprite.visible = costumeVisible;
+      } else if (cmd === 'controller') {
+        controllerVisible = !controllerVisible;
+        controllerSprite.visible = controllerVisible;
+      }
+    }
+
+    app.stage.addChild(backSprite);        // behind model
+    app.stage.addChild(model);
+    app.stage.addChild(frontSprite);       // costume front over model
+    app.stage.addChild(controllerSprite);  // controller on top of everything
+    app.stage.addChild(controllerMask);    // mask must be in scene graph for PIXI to apply it
+
+    model.anchor.set(0.5, 0.5);
+    model.x = 200;
+    model.y = 270;
+    model.scale.set(modelScale);
+
+    // ── Central function to apply all overlay params ──────────────────────
+    function applyOverlayParams() {
+      [backSprite, frontSprite].forEach(s => {
+        s.y = 270 + OVERLAY_Y;
+        s.scale.set(modelScale * OVERLAY_SCALE);
+      });
+      controllerSprite.x = CONTROLLER_X;
+      controllerSprite.y = CONTROLLER_Y;
+      controllerSprite.scale.set(modelScale * CONTROLLER_SCALE);
+      updateControllerMask();
+    }
+    applyOverlayParams(); // initial position
+
+    document.getElementById('status').textContent = 'ready';
+    document.getElementById('send-btn').disabled = false;
+
+    // Time-of-day greeting on startup — LLM generated
+    setTimeout(async () => {
+      const h = new Date().getHours();
+      const timeOfDay = h < 12 ? 'morning' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+      const prompt = `(The app just opened. It is ${timeOfDay}. Give the user a short, warm greeting. No emojis.)`;
+
+      const greetBubble = document.getElementById('speech-bubble');
+      greetBubble.textContent = '...';
+      greetBubble.classList.add('visible');
+      chatEmotion = 'happy';
+      lastProactiveTime = Date.now();
+
+      try {
+        let data;
+        if (window.__TAURI__) {
+          data = await window.__TAURI__.core.invoke('chat', { message: prompt });
+        } else {
+          const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: prompt }),
+          });
+          data = await res.json();
+        }
+        chatEmotion = data.emotion || 'happy';
+        if (data.overlay) handleOverlay(data.overlay);
+        if (data.motion) playMotion(data.motion);
+        if (data.music)  handleMusicCommand(data.music);
+        speak(data.reply, {
+          onStart: () => { greetBubble.textContent = data.reply; },
+          onEnd:   () => { scheduleIdle(); },
+        });
+      } catch (_) {
+        chatEmotion = null;
+        greetBubble.classList.remove('visible');
+      }
+    }, 800);
+
+    // Scroll to resize model + overlays together
+    window.addEventListener('wheel', (e) => {
+      modelScale = Math.max(0.05, Math.min(1.0, modelScale - e.deltaY * 0.0003));
+      model.scale.set(modelScale);
+      applyOverlayParams();
+    });
+
+    // Cursor position in client coords — updated by whichever tracking source fires.
+    // Start far off-screen so proximity emotions don't fire before first real position.
+    let cursorX = -9999;
+    let cursorY = -9999;
+
+    if (window.__TAURI__) {
+      // Poll the global cursor position from Rust every 16 ms.
+      // GetCursorPos returns physical pixels; divide by devicePixelRatio
+      // to convert to logical CSS pixels before subtracting the window offset.
+      setInterval(async () => {
+        try {
+          const [x, y] = await window.__TAURI__.core.invoke('cursor_position');
+          const dpr = window.devicePixelRatio || 1;
+          cursorX = x / dpr - window.screenX;
+          cursorY = y / dpr - window.screenY;
+        } catch (_) {}
+      }, 16);
+    } else {
+      window.addEventListener('mousemove', (e) => {
+        cursorX = e.clientX;
+        cursorY = e.clientY;
+      });
+    }
+
+    // ── Main tick ─────────────────────────────────────────────────────────
+    let time = 0;
+
+    app.ticker.add((delta) => {
+      const dt = delta / 60;
+      time += dt;
+      const core = model.internalModel.coreModel;
+
+      // ── Idle phase progression ─────────────────────────────────────────
+      const idleSec = (Date.now() - lastInteractionTime) / 1000;
+      if      (idleSec < 30)  idlePhase = 'active';
+      else if (idleSec < 120) idlePhase = 'bored';
+      else                    idlePhase = 'asleep';
+
+      // ── Proximity ──────────────────────────────────────────────────────
+      const rect = app.view.getBoundingClientRect();
+      // Anchor to her head area (upper ~30 % of the canvas)
+      const headCX = rect.left + rect.width  * 0.5;
+      const headCY = rect.top  + rect.height * 0.28;
+      const dist = Math.hypot(cursorX - headCX, cursorY - headCY);
+
+      if (idlePhase === 'asleep' && dist < 180) {
+        // Cursor gets close — wake her up startled
+        lastInteractionTime = Date.now();
+        chatEmotion = 'surprised';
+        scheduleIdle();
+      }
+
+      let proximityEmotion = null;
+      if (idlePhase !== 'asleep') {
+        if      (dist < 100) proximityEmotion = 'surprised'; // cursor right on her face
+        else if (dist < 260) proximityEmotion = 'shy';       // cursor anywhere near her
+      }
+
+      // Any proximity keeps idle timer alive (prevents bored/sleep advancing)
+      if (proximityEmotion) {
+        lastInteractionTime = Date.now();
+      }
+
+      // ── Emotion priority: chat > proximity > idle ──────────────────────
+      if (chatEmotion) {
+        targetEmotion = chatEmotion;
+      } else if (proximityEmotion) {
+        targetEmotion = proximityEmotion;
+      } else if (idlePhase === 'active') {
+        targetEmotion = 'neutral';
+      } else {
+        targetEmotion = idlePhase; // 'bored' | 'sleepy' | 'asleep'
+      }
+
+      // ── Sleep bubble ───────────────────────────────────────────────────
+      if (idlePhase === 'asleep' && !chatEmotion) {
+        if (!bubble.classList.contains('visible')) {
+          bubble.textContent = 'zzz...';
+          bubble.classList.add('visible');
+        }
+      } else if (bubble.textContent === 'zzz...') {
+        bubble.classList.remove('visible');
+      }
+
+      // ── Breath (slower and deeper when asleep) ─────────────────────────
+      const breathRate = idlePhase === 'asleep' ? 0.35 : 1.1;
+      setParam(core, 'ParamBreath', Math.sin(time * breathRate) * 0.5 + 0.5);
+
+      // ── Lerp emotion params ────────────────────────────────────────────
+      const target = EMOTIONS[targetEmotion];
+      for (const key of Object.keys(target)) {
+        if (currentParams[key] === undefined) currentParams[key] = target[key];
+        currentParams[key] = lerp(currentParams[key], target[key], 0.08);
+      }
+
+      // ── Blink ──────────────────────────────────────────────────────────
+      tickBlink(core, dt);
+
+      // ── Apply emotion params ───────────────────────────────────────────
+      for (const [key, val] of Object.entries(currentParams)) {
+        if (key === 'ParamEyeLOpen' || key === 'ParamEyeROpen') continue;
+        if (key === 'ParamMouthOpenY') continue;
+        setParam(core, key, val);
+      }
+
+      // ── Mouth ──────────────────────────────────────────────────────────
+      if (isTalking) {
+        const mouth = Math.abs(Math.sin(time * 10)) * 0.85;
+        setParam(core, 'ParamMouthOpenY', mouth);
+      } else {
+        setParam(core, 'ParamMouthOpenY', currentParams.ParamMouthOpenY ?? 0);
+      }
+
+      // ── Head movement ──────────────────────────────────────────────────
+      if (!tickMotion(core, dt)) tickIdleHead(core, dt);
+
+      // ── Ear/ahoge twitch (suppressed while asleep) ─────────────────────
+      const twitch = idlePhase === 'asleep' ? 0 :
+        Math.max(0, Math.sin(time * 3) * (Math.sin(time * 0.6) > 0.75 ? 1 : 0));
+      setParam(core, 'AhogeTwitch', twitch);
+      setParam(core, 'Param', twitch * 0.6);
+
+      // ── Eye tracking ───────────────────────────────────────────────────
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top  + rect.height / 3;
+      const eyeDx = Math.max(-1, Math.min(1, (cursorX - cx) / (rect.width * 0.6)));
+      const eyeDy = Math.max(-1, Math.min(1, (cursorY - cy) / (rect.height * 0.6)));
+      setParam(core, 'ParamEyeBallX',  eyeDx);
+      setParam(core, 'ParamEyeBallY', -eyeDy);
+    });
+
+    // ── Blink state machine ───────────────────────────────────────────────
+    function tickBlink(core, dt) {
+      if (idlePhase === 'asleep') {
+        setParam(core, 'ParamEyeLOpen', 0);
+        setParam(core, 'ParamEyeROpen', 0);
+        return;
+      }
+      blink.timer += dt;
+      const eyeBase = currentParams.ParamEyeLOpen ?? 1.0;
+      let val;
+
+      switch (blink.phase) {
+        case 'open':
+          val = eyeBase;
+          if (blink.timer >= blink.next) {
+            blink.phase = 'closing'; blink.timer = 0;
+          }
+          break;
+        case 'closing':
+          val = eyeBase * Math.max(0, 1 - blink.timer / 0.06);
+          if (blink.timer >= 0.06) { blink.phase = 'closed'; blink.timer = 0; }
+          break;
+        case 'closed':
+          val = 0;
+          if (blink.timer >= 0.04) { blink.phase = 'opening'; blink.timer = 0; }
+          break;
+        case 'opening':
+          val = eyeBase * Math.min(1, blink.timer / 0.08);
+          if (blink.timer >= 0.08) {
+            blink.phase = 'open'; blink.timer = 0;
+            blink.next = rnd(3, 6);
+          }
+          break;
+      }
+
+      setParam(core, 'ParamEyeLOpen', Math.max(0, val));
+      setParam(core, 'ParamEyeROpen', Math.max(0, val));
+    }
+
+    // ── Idle head movement ─────────────────────────────────────────────────
+    function tickIdleHead(core, dt) {
+      if (idlePhase === 'asleep') {
+        // Gradually droop head down and to the side
+        idleAngleXTarget = lerp(idleAngleXTarget,  6, 0.008);
+        idleAngleYTarget = lerp(idleAngleYTarget, -14, 0.008);
+      } else {
+        idleTimer += dt;
+        if (idleTimer >= idleInterval) {
+          idleTimer = 0;
+          idleInterval = rnd(4, 9);
+          idleAngleXTarget = rnd(-8, 8);
+          idleAngleYTarget = rnd(-5, 5);
+        }
+      }
+
+      idleAngleX = lerp(idleAngleX, idleAngleXTarget, 0.02);
+      idleAngleY = lerp(idleAngleY, idleAngleYTarget, 0.02);
+
+      // Sway is very slow and minimal while asleep
+      const sRate = idlePhase === 'asleep' ? 0.12 : 0.4;
+      const cRate = idlePhase === 'asleep' ? 0.10 : 0.3;
+      const sAmp  = idlePhase === 'asleep' ? 0.4  : 1.5;
+      const cAmp  = idlePhase === 'asleep' ? 0.3  : 1.0;
+      const swayX = idleAngleX + Math.sin(time * sRate) * sAmp;
+      const swayY = idleAngleY + Math.cos(time * cRate) * cAmp;
+
+      setParam(core, 'ParamAngleX', swayX);
+      setParam(core, 'ParamAngleY', swayY);
+      setParam(core, 'ParamAngleZ', swayX * -0.3);
+      setParam(core, 'ParamBodyAngleX', swayX * 0.25);
+      setParam(core, 'ParamBodyAngleY', swayY * 0.2);
+    }
+
+    // ── Chat UI ───────────────────────────────────────────────────────────
+    const msgInput = document.getElementById('msg-input');
+    const sendBtn  = document.getElementById('send-btn');
+    const micBtn   = document.getElementById('mic-btn');
+    const bubble   = document.getElementById('speech-bubble');
+    const statusEl = document.getElementById('status');
+
+    // Wire up Tauri drag regions (overlay class already set at page load)
+    if (window.__TAURI__) {
+      document.getElementById('drag-handle').setAttribute('data-tauri-drag-region', '');
+      document.getElementById('canvas-wrap').setAttribute('data-tauri-drag-region', '');
+    }
+
+    let emotionResetTimer = null;
+    function scheduleIdle() {
+      if (emotionResetTimer) clearTimeout(emotionResetTimer);
+      emotionResetTimer = setTimeout(() => {
+        chatEmotion = null;
+        lastInteractionTime = Date.now(); // restart idle clock so she returns to active
+        bubble.classList.remove('visible');
+        emotionResetTimer = null;
+      }, 2000);
+    }
+
+    function extractPartialReply(raw) {
+      const m = raw.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (!m) return null;
+      return m[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+
+    async function sendMessageStream(text) {
+      let rawBuffer = '';
+      let partialReply = '';
+
+      const res = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        for (const line of dec.decode(value, { stream: true }).split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+          if (evt.error) throw new Error(evt.error);
+
+          if (evt.chunk) {
+            rawBuffer += evt.chunk;
+            const p = extractPartialReply(rawBuffer);
+            if (p !== null && p !== partialReply) {
+              partialReply = p;
+              bubble.textContent = p || '...';
+            }
+          }
+
+          if (evt.done) {
+            chatEmotion = evt.emotion || 'neutral';
+            if (evt.overlay) handleOverlay(evt.overlay);
+            if (evt.motion) playMotion(evt.motion);
+            if (evt.music)  handleMusicCommand(evt.music);
+          }
+        }
+      }
+
+      statusEl.textContent = 'ready';
+      const finalText = partialReply || rawBuffer;
+      speak(finalText, {
+        onStart: () => { bubble.textContent = finalText; },
+        onEnd:   () => { scheduleIdle(); },
+      });
+    }
+
+    async function sendMessage(overrideText) {
+      const text = overrideText ?? msgInput.value.trim();
+      if (!text) return;
+
+      if (emotionResetTimer) { clearTimeout(emotionResetTimer); emotionResetTimer = null; }
+      lastInteractionTime = Date.now();
+      lastProactiveTime   = Date.now();
+      msgInput.value = '';
+      sendBtn.disabled = true;
+      micBtn.disabled  = true;
+      statusEl.textContent = 'thinking...';
+      chatEmotion = null;
+
+      bubble.textContent = '...';
+      bubble.classList.add('visible');
+
+      try {
+        if (window.__TAURI__) {
+          const data = await window.__TAURI__.core.invoke('chat', { message: text });
+          chatEmotion = data.emotion || 'neutral';
+          if (data.overlay) handleOverlay(data.overlay);
+          if (data.motion) playMotion(data.motion);
+          if (data.music)  handleMusicCommand(data.music);
+          statusEl.textContent = 'ready';
+          speak(data.reply, {
+            onStart: () => { bubble.textContent = data.reply; },
+            onEnd:   () => { scheduleIdle(); },
+          });
+        } else if (settings.streaming) {
+          await sendMessageStream(text);
+        } else {
+          const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text }),
+          });
+          if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            let detail;
+            try { detail = JSON.parse(errText).detail; } catch (_) {}
+            throw new Error(detail || `HTTP ${res.status}`);
+          }
+          const raw = await res.text();
+          let data;
+          try {
+            data = JSON.parse(raw);
+          } catch (_) {
+            throw new Error('Server returned non-JSON. Is the Python backend running? (start.sh)');
+          }
+          chatEmotion = data.emotion || 'neutral';
+          if (data.overlay) handleOverlay(data.overlay);
+          if (data.motion) playMotion(data.motion);
+          if (data.music)  handleMusicCommand(data.music);
+          statusEl.textContent = 'ready';
+          speak(data.reply, {
+            onStart: () => { bubble.textContent = data.reply; },
+            onEnd:   () => { scheduleIdle(); },
+          });
+        }
+      } catch (e) {
+        bubble.textContent = 'Oops! ' + e.message;
+        chatEmotion = 'sad';
+        statusEl.textContent = 'error';
+        scheduleIdle();
+      } finally {
+        sendBtn.disabled = false;
+        micBtn.disabled  = false;
+        msgInput.focus();
+      }
+    }
+
+    // ── Proactive messages ────────────────────────────────────────────────
+    async function triggerProactive() {
+      if (sendBtn.disabled || chatEmotion) return; // don't interrupt
+      lastProactiveTime   = Date.now();
+      lastInteractionTime = Date.now();
+
+      const h = new Date().getHours();
+      const triggers = h < 12
+        ? ['(You want to wish the user a good morning and ask what they have planned today.)',
+           '(Say something energetic and cheerful to start the morning.)']
+        : h < 17
+        ? ['(Check in on the user. Ask how their day is going so far.)',
+           '(Share a fun thought or ask what the user is working on.)']
+        : h < 21
+        ? ['(It\'s evening. Ask the user how their day went.)',
+           '(You want to chat. Say something warm and curious.)']
+        : ['(It\'s late at night. Express concern and ask if the user is okay.)',
+           '(Comment on how late it is and ask what\'s keeping them up.)'];
+
+      const prompt = triggers[Math.floor(Math.random() * triggers.length)];
+
+      bubble.textContent = '...';
+      bubble.classList.add('visible');
+      chatEmotion = 'neutral';
+
+      try {
+        let data;
+        if (window.__TAURI__) {
+          data = await window.__TAURI__.core.invoke('chat', { message: prompt });
+        } else {
+          const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: prompt }),
+          });
+          data = await res.json();
+        }
+        chatEmotion = data.emotion || 'happy';
+        if (data.overlay) handleOverlay(data.overlay);
+        if (data.motion) playMotion(data.motion);
+        if (data.music)  handleMusicCommand(data.music);
+        speak(data.reply, {
+          onStart: () => { bubble.textContent = data.reply; },
+          onEnd:   () => { scheduleIdle(); },
+        });
+      } catch (_) {
+        chatEmotion = null;
+        bubble.classList.remove('visible');
+      }
+    }
+
+    // Check every minute whether it's time for a proactive message
+    setInterval(() => {
+      if (
+        settings.proactive &&
+        Date.now() - lastProactiveTime > PROACTIVE_INTERVAL &&
+        idlePhase === 'active' &&
+        !chatEmotion &&
+        !sendBtn.disabled
+      ) {
+        triggerProactive();
+      }
+    }, 60_000);
+
+    // ── Screen awareness — react when the active window changes ────────────
+    let lastWindowTitle = '';
+    async function checkActiveWindow() {
+      if (!window.__TAURI__ || chatEmotion || sendBtn.disabled) return;
+      try {
+        const title = await window.__TAURI__.core.invoke('active_window');
+        if (!title || title === lastWindowTitle) return;
+        const prev = lastWindowTitle;
+        lastWindowTitle = title;
+        if (!prev) return; // skip first poll (no reaction on startup)
+
+        // Only react to app-level changes, not document/tab title updates
+        const appName = t => t.split(/\s[–\-—]\s/).pop().trim();
+        if (appName(prev) === appName(title)) return;
+
+        // Randomly skip ~55% of switches so she's not constantly commenting
+        if (Math.random() > 0.45) return;
+
+        if (idlePhase === 'asleep' || chatEmotion || sendBtn.disabled) return;
+        lastProactiveTime = Date.now();
+        lastInteractionTime = Date.now();
+
+        sendBtn.disabled = true;
+        try {
+          const data = await window.__TAURI__.core.invoke('chat', {
+            message: `(You just noticed the user switched to: "${title}". React briefly and cutely.)`
+          });
+          if (!data) return;
+          chatEmotion = data.emotion || 'neutral';
+          if (data.overlay) handleOverlay(data.overlay);
+          if (data.motion) playMotion(data.motion);
+          if (data.music)  handleMusicCommand(data.music);
+          const bubble = document.getElementById('speech-bubble');
+          speak(data.reply, {
+            onStart: () => { bubble.textContent = data.reply; bubble.classList.add('visible'); },
+            onEnd:   () => { scheduleIdle(); },
+          });
+        } catch (_) {
+          chatEmotion = null;
+        } finally {
+          sendBtn.disabled = false;
+        }
+      } catch (_) {}
+    }
+    setInterval(checkActiveWindow, 30_000); // poll every 30 s
+
+    // ── TTS + lip sync ─────────────────────────────────────────────────────
+    // onStart fires when speech begins (reveals bubble text)
+    // onEnd   fires when speech finishes (starts idle timer)
+    function stripEmoji(text) {
+      return text.replace(/\p{Extended_Pictographic}/gu, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function speak(text, { onStart, onEnd } = {}) {
+      if (!window.speechSynthesis) { onStart?.(); onEnd?.(); return; }
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(stripEmoji(text));
+      utter.rate   = settings.ttsRate;
+      utter.pitch  = settings.ttsPitch;
+      utter.volume = 1.0;
+      const voices = speechSynthesis.getVoices();
+      const selected = settings.ttsVoice && voices.find(v => v.name === settings.ttsVoice);
+      const female   = voices.find(v => /female|zira|hazel|samantha|victoria/i.test(v.name));
+      utter.voice = selected || female || undefined;
+      utter.onstart = () => { isTalking = true;  onStart?.(); };
+      utter.onend   = () => { isTalking = false; onEnd?.(); };
+      utter.onerror = () => { isTalking = false; onStart?.(); onEnd?.(); };
+      speechSynthesis.speak(utter);
+    }
+
+    sendBtn.addEventListener('click', () => sendMessage());
+    msgInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+
+    // Any interaction with the window resets the idle clock
+    document.addEventListener('mousedown', () => { lastInteractionTime = Date.now(); });
+    document.addEventListener('keydown',   () => { lastInteractionTime = Date.now(); });
+
+    if (speechSynthesis.onvoiceschanged !== undefined) {
+      speechSynthesis.onvoiceschanged = () => {};
+    }
+
+    // ── Voice input (Speech Recognition) ──────────────────────────────────
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (SR) {
+      const recog = new SR();
+      recog.continuous      = false;
+      recog.interimResults  = true;
+      recog.lang            = 'en-US';
+
+      let listening = false;
+      let finalSent = false; // guard against double-send
+
+      function startListening() {
+        if (listening) return;
+        // Don't interrupt while Pachan is replying
+        if (sendBtn.disabled) return;
+        finalSent  = false;
+        msgInput.value = '';
+        recog.start();
+      }
+
+      function stopListening() {
+        if (!listening) return;
+        recog.stop();
+      }
+
+      recog.onstart = () => {
+        listening = true;
+        micBtn.classList.add('listening');
+        micBtn.title = 'Listening… (click or release Space to send)';
+        statusEl.textContent = 'listening...';
+        document.body.classList.add('listening');
+      };
+
+      recog.onresult = (e) => {
+        const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+        msgInput.value = transcript;
+
+        // Auto-send on final result
+        if (e.results[e.results.length - 1].isFinal && !finalSent) {
+          finalSent = true;
+          recog.stop();
+          if (transcript.trim()) sendMessage(transcript.trim());
+        }
+      };
+
+      recog.onend = () => {
+        listening = false;
+        micBtn.classList.remove('listening');
+        micBtn.classList.remove('processing');
+        micBtn.title = 'Click to speak  (or hold Space)';
+        document.body.classList.remove('listening');
+        if (statusEl.textContent === 'listening...') statusEl.textContent = 'ready';
+      };
+
+      recog.onerror = (e) => {
+        listening = false;
+        micBtn.classList.remove('listening', 'processing');
+        document.body.classList.remove('listening');
+        if (e.error !== 'no-speech' && e.error !== 'aborted') {
+          statusEl.textContent = 'mic error: ' + e.error;
+        }
+      };
+
+      // Click mic to toggle
+      micBtn.addEventListener('click', () => {
+        listening ? stopListening() : startListening();
+      });
+
+      // Hold Space = push-to-talk (only when input not focused)
+      let spaceHeld = false;
+      document.addEventListener('keydown', (e) => {
+        if (e.code !== 'Space' || e.target === msgInput || spaceHeld) return;
+        e.preventDefault();
+        spaceHeld = true;
+        startListening();
+      });
+      document.addEventListener('keyup', (e) => {
+        if (e.code !== 'Space') return;
+        spaceHeld = false;
+        stopListening();
+      });
+
+    } else {
+      // Browser doesn't support Speech Recognition
+      micBtn.style.display = 'none';
+    }
+
+    // ── YouTube Music ─────────────────────────────────────────────────────
+    const nowPlayingEl = document.getElementById('now-playing');
+    let lastTrackId    = null;
+
+    async function handleMusicCommand(music) {
+      if (!music?.action) return;
+      if (music.action === 'search') {
+        statusEl.textContent = `searching "${music.query}"...`;
+      }
+      try {
+        let result;
+        if (window.__TAURI__) {
+          result = await window.__TAURI__.core.invoke('music_command', { action: music.action, query: music.query || '' });
+        } else {
+          const res = await fetch('/music/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(music),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          result = await res.json();
+        }
+        // After a search, show what's playing and refresh the now-playing bar
+        if (music.action === 'search' && result?.title) {
+          nowPlayingEl.textContent = `♪ ${result.title} — ${result.author || ''}`;
+          nowPlayingEl.classList.add('active');
+        }
+        statusEl.textContent = 'ready';
+        // Poll for live state after a short delay so the track has time to load
+        if (music.action === 'search') setTimeout(pollNowPlaying, 3000);
+      } catch (e) {
+        statusEl.textContent = 'ready';
+        const msg = String(e);
+        if (msg.includes('NEEDS_PAIRING') && window.__TAURI__) {
+          bubble.textContent = 'Connecting to YouTube Music...';
+          bubble.classList.add('visible');
+          chatEmotion = 'shy';
+          try {
+            const code = await window.__TAURI__.core.invoke('pair_ytmd');
+            bubble.textContent = `YouTube Music is showing a 4-digit code (${code}) — open YTMD and click Allow!`;
+            await window.__TAURI__.core.invoke('wait_ytmd_token', { code });
+            result = await window.__TAURI__.core.invoke('music_command', { action: music.action, query: music.query || '' });
+            bubble.textContent = result?.title ? `Now playing: ${result.title}!` : 'Connected to YouTube Music!';
+            setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 2000);
+          } catch (pairErr) {
+            console.error('Pairing failed:', pairErr);
+            bubble.textContent = String(pairErr);
+            chatEmotion = 'sad';
+            setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 6000);
+          }
+        } else if (msg.includes('No results found')) {
+          bubble.textContent = `I couldn't find that song on YouTube Music! Try a different search.`;
+          bubble.classList.add('visible');
+          chatEmotion = 'sad';
+          setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 4000);
+        } else {
+          console.error('Music command failed:', e);
+          bubble.textContent = 'Hmm, I couldn\'t reach YouTube Music! Is it installed and is the Companion Server enabled?';
+          bubble.classList.add('visible');
+          chatEmotion = 'sad';
+          setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 4000);
+        }
+      }
+    }
+
+    async function pollNowPlaying() {
+      try {
+        let data;
+        if (window.__TAURI__) {
+          data = await window.__TAURI__.core.invoke('music_status');
+        } else {
+          const res = await fetch('/music/status');
+          if (!res.ok) return;
+          data = await res.json();
+        }
+        if (data.error || !data.track?.id) { nowPlayingEl.classList.remove('active'); return; }
+
+        const { track, player } = data;
+        nowPlayingEl.textContent = `♪ ${track.title} — ${track.author}`;
+        nowPlayingEl.classList.toggle('active', !player?.isPaused);
+
+        if (track.id !== lastTrackId) {
+          const prev = lastTrackId;
+          lastTrackId = track.id;
+          if (prev && settings.musicReactions && !chatEmotion && !sendBtn.disabled && idlePhase !== 'asleep') {
+            triggerMusicReaction(track);
+          }
+        }
+      } catch (_) {}
+    }
+
+    async function triggerMusicReaction(track) {
+      lastProactiveTime   = Date.now();
+      lastInteractionTime = Date.now();
+      bubble.textContent  = '...';
+      bubble.classList.add('visible');
+      chatEmotion = 'neutral';
+
+      try {
+        const prompt = `(A new song just started: "${track.title}" by ${track.author}. React briefly and cutely to this song.)`;
+        let data;
+        if (window.__TAURI__) {
+          data = await window.__TAURI__.core.invoke('chat', { message: prompt });
+        } else {
+          const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: prompt }),
+          });
+          if (!res.ok) throw new Error();
+          data = await res.json();
+        }
+        chatEmotion = data.emotion || 'happy';
+        if (data.motion) playMotion(data.motion);
+        if (data.music)  handleMusicCommand(data.music);
+        speak(data.reply, {
+          onStart: () => { bubble.textContent = data.reply; },
+          onEnd:   () => { scheduleIdle(); },
+        });
+      } catch (_) {
+        chatEmotion = null;
+        bubble.classList.remove('visible');
+      }
+    }
+
+    pollNowPlaying();
+    setInterval(pollNowPlaying, 30_000);
+
+    // ── Vision peek ───────────────────────────────────────────────────────
+    let lastVisionTime = Date.now();
+
+    async function triggerVision() {
+      if (!window.__TAURI__ || sendBtn.disabled || chatEmotion) return;
+      lastVisionTime    = Date.now();
+      lastInteractionTime = Date.now();
+
+      try {
+        const screenshot = await window.__TAURI__.core.invoke('take_screenshot');
+        if (!screenshot) return;
+
+        const windowTitle = await window.__TAURI__.core.invoke('active_window');
+
+        bubble.textContent = '...';
+        bubble.classList.add('visible');
+        chatEmotion = 'neutral';
+
+        const res = await fetch('/vision', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ screenshot, window_title: windowTitle || '' }),
+        });
+        if (!res.ok) { chatEmotion = null; bubble.classList.remove('visible'); return; }
+        const data = await res.json();
+
+        chatEmotion = data.emotion || 'neutral';
+        if (data.motion) playMotion(data.motion);
+        speak(data.reply, {
+          onStart: () => { bubble.textContent = data.reply; },
+          onEnd:   () => { scheduleIdle(); },
+        });
+      } catch (_) {
+        chatEmotion = null;
+        bubble.classList.remove('visible');
+      }
+    }
+
+    setInterval(() => {
+      if (
+        settings.vision &&
+        window.__TAURI__ &&
+        Date.now() - lastVisionTime > settings.visionInterval * 60 * 1000 &&
+        idlePhase !== 'asleep' &&
+        !chatEmotion &&
+        !sendBtn.disabled
+      ) {
+        triggerVision();
+      }
+    }, 60_000);
+
+    // ── Settings panel ────────────────────────────────────────────────────
+    const settingsBtn   = document.getElementById('settings-btn');
+    const settingsPanel = document.getElementById('settings-panel');
+    const spStreaming    = document.getElementById('sp-streaming');
+    const spVoice       = document.getElementById('sp-voice');
+    const spRate        = document.getElementById('sp-rate');
+    const spPitch       = document.getElementById('sp-pitch');
+    const spProactive   = document.getElementById('sp-proactive');
+    const spInterval    = document.getElementById('sp-interval');
+    const spRateVal     = document.getElementById('sp-rate-val');
+    const spPitchVal    = document.getElementById('sp-pitch-val');
+    const spIntervalVal = document.getElementById('sp-interval-val');
+    const spModelName   = document.getElementById('sp-model-name');
+    const spVision      = document.getElementById('sp-vision');
+    const spVisionIvl   = document.getElementById('sp-vision-ivl');
+    const spVisionVal   = document.getElementById('sp-vision-val');
+    const spMusicReact  = document.getElementById('sp-music-react');
+
+    function syncSettingsUI() {
+      spStreaming.checked       = settings.streaming;
+      spRate.value              = settings.ttsRate;
+      spPitch.value             = settings.ttsPitch;
+      spProactive.checked       = settings.proactive;
+      spInterval.value          = settings.proactiveInterval;
+      spRateVal.textContent     = settings.ttsRate.toFixed(1);
+      spPitchVal.textContent    = settings.ttsPitch.toFixed(1);
+      spIntervalVal.textContent = settings.proactiveInterval + 'm';
+      spVision.checked          = settings.vision;
+      spVisionIvl.value         = settings.visionInterval;
+      spVisionVal.textContent   = settings.visionInterval + 'm';
+      spMusicReact.checked      = settings.musicReactions;
+    }
+    syncSettingsUI();
+
+    function populateVoices() {
+      const voices = speechSynthesis.getVoices();
+      if (!voices.length) return;
+      spVoice.innerHTML = '<option value="">Auto</option>';
+      voices.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.name;
+        opt.textContent = v.name.replace(/Microsoft\s+/i, '').replace(/\s*\(Natural\)/i, '').trim();
+        if (v.name === settings.ttsVoice) opt.selected = true;
+        spVoice.appendChild(opt);
+      });
+    }
+    populateVoices();
+    speechSynthesis.addEventListener('voiceschanged', populateVoices);
+
+    fetch('/settings').then(r => r.json()).then(d => {
+      spModelName.textContent = d.model || '';
+      if (!d.vision_model) spVision.disabled = true; // grey out if not configured
+    }).catch(() => {});
+
+    settingsBtn.addEventListener('click', () => {
+      const open = settingsPanel.classList.toggle('open');
+      settingsBtn.classList.toggle('active', open);
+    });
+
+    spStreaming.addEventListener('change', () => {
+      settings.streaming = spStreaming.checked;
+      saveSettings();
+    });
+    spVoice.addEventListener('change', () => {
+      settings.ttsVoice = spVoice.value;
+      saveSettings();
+    });
+    spRate.addEventListener('input', () => {
+      settings.ttsRate = parseFloat(spRate.value);
+      spRateVal.textContent = settings.ttsRate.toFixed(1);
+      saveSettings();
+    });
+    spPitch.addEventListener('input', () => {
+      settings.ttsPitch = parseFloat(spPitch.value);
+      spPitchVal.textContent = settings.ttsPitch.toFixed(1);
+      saveSettings();
+    });
+    spProactive.addEventListener('change', () => {
+      settings.proactive = spProactive.checked;
+      saveSettings();
+    });
+    spInterval.addEventListener('input', () => {
+      settings.proactiveInterval = parseInt(spInterval.value);
+      spIntervalVal.textContent = settings.proactiveInterval + 'm';
+      PROACTIVE_INTERVAL = settings.proactiveInterval * 60 * 1000;
+      saveSettings();
+    });
+    spVision.addEventListener('change', () => {
+      settings.vision = spVision.checked;
+      saveSettings();
+    });
+    spVisionIvl.addEventListener('input', () => {
+      settings.visionInterval = parseInt(spVisionIvl.value);
+      spVisionVal.textContent = settings.visionInterval + 'm';
+      saveSettings();
+    });
+    spMusicReact.addEventListener('change', () => {
+      settings.musicReactions = spMusicReact.checked;
+      saveSettings();
+    });
+
+  })();
+  </script>
+</body>
+</html>
