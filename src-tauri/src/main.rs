@@ -395,7 +395,6 @@ fn songs_dir() -> std::path::PathBuf {
 }
 
 async fn play_voicevox_song(song_name: &str) -> Result<(), String> {
-    // Reject names that could escape the songs/ directory
     if song_name.is_empty() || !song_name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
         return Err(format!("Invalid song name '{}'", song_name));
     }
@@ -444,7 +443,7 @@ async fn play_voicevox_song(song_name: &str) -> Result<(), String> {
         let cursor = std::io::Cursor::new(wav_bytes);
         let Ok(source) = rodio::Decoder::new(cursor) else { return; };
         sink.append(source);
-        sink.sleep_until_end(); // _stream kept alive here until done
+        sink.sleep_until_end();
     });
 
     Ok(())
