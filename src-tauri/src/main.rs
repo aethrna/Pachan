@@ -515,7 +515,7 @@ async fn wait_ytmd_token(code: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn music_command(action: String, query: String) -> Result<serde_json::Value, String> {
+async fn music_command(action: String, query: Option<String>) -> Result<serde_json::Value, String> {
     let host = std::env::var("YTMD_HOST")
         .unwrap_or_else(|_| "http://localhost:9863".to_string());
     ensure_ytmd_running(&host).await?;
@@ -523,15 +523,15 @@ async fn music_command(action: String, query: String) -> Result<serde_json::Valu
     let token = load_ytmd_token()
         .ok_or_else(|| "NEEDS_PAIRING".to_string())?;
     let client = reqwest::Client::new();
+    let query = query.unwrap_or_default();
 
     match action.as_str() {
         "search" => {
             let (vid, title, author) = yt_search(&query).await
                 .ok_or_else(|| "No results found".to_string())?;
-            let url = format!("https://music.youtube.com/watch?v={}", vid);
             let res = client.post(format!("{}/api/v1/command", host))
                 .header("Authorization", format!("Bearer {}", token))
-                .json(&serde_json::json!({"command": "navigate", "value": url}))
+                .json(&serde_json::json!({"command": "changeVideo", "data": {"videoId": vid}}))
                 .timeout(std::time::Duration::from_secs(2))
                 .send()
                 .await
@@ -549,8 +549,10 @@ async fn music_command(action: String, query: String) -> Result<serde_json::Valu
             if status_res.status().as_u16() == 401 { return Err("NEEDS_PAIRING".to_string()); }
             let status: serde_json::Value = status_res.json().await
                 .map_err(|_| "Parse error".to_string())?;
-            let is_paused = status["player"]["isPaused"].as_bool().unwrap_or(true);
-            let needs_toggle = (action == "play" && is_paused) || (action == "pause" && !is_paused);
+            // trackState: 1 = playing, 0 or -1 = paused/stopped
+            let track_state = status["player"]["trackState"].as_i64().unwrap_or(0);
+            let is_playing = track_state == 1;
+            let needs_toggle = (action == "play" && !is_playing) || (action == "pause" && is_playing);
             if needs_toggle {
                 ytmd_send(&client, &host, "playPause", &token).await?;
             }
