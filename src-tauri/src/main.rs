@@ -8,6 +8,11 @@ use tauri::{
     Manager, PhysicalPosition, State,
 };
 
+#[derive(Clone)]
+struct RuntimePaths {
+    data_dir: std::path::PathBuf,
+}
+
 const SYSTEM_PROMPT_BASE: &str = "You are Pachan, a cheerful anime girl avatar based on Pachirisu.\n\
 You are cute, energetic, and sweet. Keep replies SHORT — 1 to 2 sentences max.\n\
 \n\
@@ -26,13 +31,12 @@ MOTION animates your head. Use it occasionally to make replies feel alive (not e
 MUSIC controls YouTube Music playback. Set ONLY when the user asks for music control.\n\
 If asked to pick a song yourself (e.g. \"play anything\", \"choose a song\"), invent a query that fits your cheerful personality.\n\
 - {\"action\": \"search\", \"query\": \"song or artist\"} — search and play\n\
-- {\"action\": \"play\"}        — resume playback\n\
+- {\"action\": \"play\"}        — resume an already loaded paused track; never use this to choose new music\n\
 - {\"action\": \"pause\"}       — pause playback\n\
 - {\"action\": \"next\"}        — skip track\n\
 - {\"action\": \"previous\"}    — previous track\n\
 - {\"action\": \"volume_up\"}   — volume up\n\
 - {\"action\": \"volume_down\"} — volume down\n\
-- {\"action\": \"sing\", \"query\": \"song_filename\"} — sing a pre-loaded VoiceVox song (e.g. renai_circulation)\n\
 - null — no music action (default)\n\
 \n\
 OVERLAY controls your visible accessories. Set it ONLY when the user asks you to put on or\n\
@@ -50,27 +54,22 @@ Pick the emotion that best matches the tone of your reply.";
 const VALID_EMOTIONS: &[&str] = &["neutral", "happy", "sad", "surprised", "angry", "shy"];
 const VALID_OVERLAYS: &[&str] = &["costume", "controller"];
 const VALID_MOTIONS:  &[&str] = &["nod", "shake", "excited", "tilt"];
+const VALID_MUSIC_ACTIONS: &[&str] = &["search", "play", "pause", "next", "previous", "volume_up", "volume_down"];
+const VISION_PROMPT: &str = "You are Pachan, a cheerful anime girl peeking at the user's screen.\n\
+Make ONE short, cute, specific comment about what you actually see. Be genuine and observational.\n\
+Respond with ONLY valid JSON: {\"reply\": \"...\", \"emotion\": \"EMOTION\", \"motion\": null}\n\
+EMOTION must be one of: neutral happy sad surprised angry shy";
 
 struct ConversationHistory(Mutex<Vec<serde_json::Value>>);
 struct UserProfile(Mutex<serde_json::Value>);
 
-fn history_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..").join("pachan_history.json")
-}
-
-fn profile_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..").join("user_profile.json")
-}
-
-fn save_history(history: &[serde_json::Value]) {
+fn save_history(paths: &RuntimePaths, history: &[serde_json::Value]) {
     let capped: Vec<_> = history.iter().rev().take(100).rev().cloned().collect();
-    let _ = std::fs::write(history_path(), serde_json::to_string(&capped).unwrap_or_default());
+    let _ = std::fs::write(paths.data_dir.join("pachan_history.json"), serde_json::to_string(&capped).unwrap_or_default());
 }
 
-fn save_profile(profile: &serde_json::Value) {
-    let _ = std::fs::write(profile_path(), serde_json::to_string_pretty(profile).unwrap_or_default());
+fn save_profile(paths: &RuntimePaths, profile: &serde_json::Value) {
+    let _ = std::fs::write(paths.data_dir.join("user_profile.json"), serde_json::to_string_pretty(profile).unwrap_or_default());
 }
 
 fn build_system_prompt(profile: &serde_json::Value) -> String {
@@ -116,6 +115,15 @@ fn parse_llm_response(raw: &str) -> serde_json::Value {
                     data["motion"] = serde_json::json!(null);
                 }
             }
+            if let Some(music) = data.get("music") {
+                let valid = music.is_null() || music.as_object()
+                    .and_then(|m| m.get("action"))
+                    .and_then(|a| a.as_str())
+                    .is_some_and(|a| VALID_MUSIC_ACTIONS.contains(&a));
+                if !valid {
+                    data["music"] = serde_json::json!(null);
+                }
+            }
             // remember field passes through as-is (string or null)
             data
         }
@@ -123,11 +131,70 @@ fn parse_llm_response(raw: &str) -> serde_json::Value {
     }
 }
 
+fn add_ollama_auth(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let api_key = std::env::var("OLLAMA_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return req;
+    }
+    if std::env::var("OLLAMA_AUTH_HEADER")
+        .unwrap_or_else(|_| "Bearer".to_string())
+        .eq_ignore_ascii_case("x-api-key")
+    {
+        req.header("x-api-key", api_key)
+    } else {
+        req.header("Authorization", format!("Bearer {api_key}"))
+    }
+}
+
+#[tauri::command]
+fn get_settings() -> serde_json::Value {
+    serde_json::json!({
+        "model": std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".to_string()),
+        "host": std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        "vision_model": std::env::var("OLLAMA_VISION_MODEL").unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+async fn vision(screenshot: String, window_title: String) -> Result<serde_json::Value, String> {
+    let model = std::env::var("OLLAMA_VISION_MODEL")
+        .map_err(|_| "OLLAMA_VISION_MODEL is not configured".to_string())?;
+    if model.trim().is_empty() {
+        return Err("OLLAMA_VISION_MODEL is not configured".to_string());
+    }
+    let host = std::env::var("OLLAMA_HOST")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let context = if window_title.is_empty() {
+        "What do you see on my screen?".to_string()
+    } else {
+        format!("The user is currently in: {window_title}. What do you see on my screen?")
+    };
+    let req = reqwest::Client::new()
+        .post(format!("{}/api/chat", host.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "stream": false,
+            "messages": [
+                {"role": "system", "content": VISION_PROMPT},
+                {"role": "user", "content": context, "images": [screenshot]}
+            ]
+        }));
+    let resp = add_ollama_auth(req).send().await
+        .map_err(|e| format!("Vision model error: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Vision model HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Vision response parse error: {e}"))?;
+    Ok(parse_llm_response(body["message"]["content"].as_str().unwrap_or("")))
+}
+
 #[tauri::command]
 async fn chat(
     message: String,
     history_state: State<'_, ConversationHistory>,
     profile_state: State<'_, UserProfile>,
+    paths: State<'_, RuntimePaths>,
 ) -> Result<serde_json::Value, String> {
     let ollama_host = std::env::var("OLLAMA_HOST")
         .unwrap_or_else(|_| "http://localhost:11434".to_string());
@@ -181,7 +248,7 @@ async fn chat(
                 if let Some(obj) = profile.as_object_mut() {
                     obj.insert(key, serde_json::json!(val));
                 }
-                save_profile(&profile);
+                save_profile(&paths, &profile);
             }
         }
     }
@@ -189,22 +256,140 @@ async fn chat(
     {
         let mut h = history_state.0.lock().unwrap();
         h.push(serde_json::json!({"role": "assistant", "content": serde_json::to_string(&parsed).unwrap_or_default()}));
-        save_history(&h);
+        save_history(&paths, &h);
     }
 
     Ok(parsed)
 }
 
 #[tauri::command]
+async fn chat_stream(
+    message: String,
+    on_event: tauri::ipc::Channel<serde_json::Value>,
+    history_state: State<'_, ConversationHistory>,
+    profile_state: State<'_, UserProfile>,
+    paths: State<'_, RuntimePaths>,
+) -> Result<(), String> {
+    let ollama_host = std::env::var("OLLAMA_HOST")
+        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let model = std::env::var("OLLAMA_MODEL")
+        .unwrap_or_else(|_| "llama3.2".to_string());
+
+    let messages = {
+        let mut history = history_state.0.lock().unwrap();
+        let profile = profile_state.0.lock().unwrap();
+        history.push(serde_json::json!({"role": "user", "content": message}));
+        let recent: Vec<_> = history.iter().rev().take(10).rev().cloned().collect();
+        let mut messages = vec![serde_json::json!({
+            "role": "system",
+            "content": build_system_prompt(&profile)
+        })];
+        messages.extend(recent);
+        messages
+    };
+
+    let request = reqwest::Client::new()
+        .post(format!("{}/api/chat", ollama_host.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": true
+        }));
+    let mut response = add_ollama_auth(request)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama error: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Ollama HTTP {}", response.status()));
+    }
+
+    let mut pending = Vec::new();
+    let mut full_response = String::new();
+    while let Some(bytes) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Ollama stream error: {e}"))?
+    {
+        pending.extend_from_slice(&bytes);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8(pending.drain(..newline).collect())
+                .map_err(|e| format!("Ollama stream encoding error: {e}"))?;
+            pending.drain(..1);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let event: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| format!("Ollama stream parse error: {e}"))?;
+            if let Some(error) = event.get("error").and_then(|value| value.as_str()) {
+                return Err(error.to_string());
+            }
+            if let Some(content) = event["message"]["content"].as_str() {
+                if !content.is_empty() {
+                    full_response.push_str(content);
+                    on_event
+                        .send(serde_json::json!({"event": "chunk", "content": content}))
+                        .map_err(|e| format!("Stream channel error: {e}"))?;
+                }
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        let pending = String::from_utf8(pending)
+            .map_err(|e| format!("Ollama stream encoding error: {e}"))?;
+        let event: serde_json::Value = serde_json::from_str(pending.trim())
+            .map_err(|e| format!("Ollama stream parse error: {e}"))?;
+        if let Some(content) = event["message"]["content"].as_str() {
+            full_response.push_str(content);
+            on_event
+                .send(serde_json::json!({"event": "chunk", "content": content}))
+                .map_err(|e| format!("Stream channel error: {e}"))?;
+        }
+    }
+    if full_response.trim().is_empty() {
+        return Err("Ollama returned an empty response".to_string());
+    }
+
+    let parsed = parse_llm_response(&full_response);
+    if let Some(fact) = parsed.get("remember").and_then(|value| value.as_str()) {
+        if let Some((key, value)) = fact.split_once(':') {
+            let key = key.trim().to_lowercase().replace(' ', "_");
+            let value = value.trim();
+            if !key.is_empty() && !value.is_empty() {
+                let mut profile = profile_state.0.lock().unwrap();
+                if let Some(object) = profile.as_object_mut() {
+                    object.insert(key, serde_json::json!(value));
+                }
+                save_profile(&paths, &profile);
+            }
+        }
+    }
+    {
+        let mut history = history_state.0.lock().unwrap();
+        history.push(serde_json::json!({
+            "role": "assistant",
+            "content": serde_json::to_string(&parsed).unwrap_or_default()
+        }));
+        save_history(&paths, &history);
+    }
+    on_event
+        .send(serde_json::json!({"event": "done", "data": parsed}))
+        .map_err(|e| format!("Stream channel error: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn reset_chat(
     history_state: State<'_, ConversationHistory>,
     profile_state: State<'_, UserProfile>,
+    paths: State<'_, RuntimePaths>,
 ) {
     history_state.0.lock().unwrap().clear();
-    let _ = std::fs::remove_file(history_path());
+    let _ = std::fs::remove_file(paths.data_dir.join("pachan_history.json"));
     // Clear profile too so she forgets everything
     *profile_state.0.lock().unwrap() = serde_json::json!({});
-    let _ = std::fs::remove_file(profile_path());
+    let _ = std::fs::remove_file(paths.data_dir.join("user_profile.json"));
 }
 
 #[cfg(target_os = "windows")]
@@ -297,55 +482,75 @@ fn take_screenshot() -> Option<String> {
     capture_screen_base64()
 }
 
-fn ytmd_token_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..").join("ytmd_token.json")
-}
-
-fn load_ytmd_token() -> Option<String> {
-    let s = std::fs::read_to_string(ytmd_token_path()).ok()?;
+fn load_ytmd_token(paths: &RuntimePaths) -> Option<String> {
+    let s = std::fs::read_to_string(paths.data_dir.join("ytmd_token.json")).ok()?;
     serde_json::from_str::<serde_json::Value>(&s).ok()?["token"]
         .as_str().map(str::to_string)
 }
 
-fn save_ytmd_token(token: &str) {
+fn save_ytmd_token(paths: &RuntimePaths, token: &str) {
     let _ = std::fs::write(
-        ytmd_token_path(),
+        paths.data_dir.join("ytmd_token.json"),
         serde_json::to_string(&serde_json::json!({"token": token})).unwrap_or_default(),
     );
 }
 
 #[tauri::command]
-async fn music_status() -> serde_json::Value {
+async fn music_status(paths: State<'_, RuntimePaths>) -> Result<serde_json::Value, String> {
     let host = std::env::var("YTMD_HOST")
         .unwrap_or_else(|_| "http://localhost:9863".to_string());
-    let token = load_ytmd_token().unwrap_or_default();
-    match reqwest::Client::new()
+    let token = load_ytmd_token(&paths).unwrap_or_default();
+    let response = reqwest::Client::new()
         .get(format!("{}/api/v1/state", host))
         .header("Authorization", token)
         .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
-    {
-        Ok(r) => r.json().await.unwrap_or_else(|_| serde_json::json!({"error": "parse error"})),
-        Err(_) => serde_json::json!({"error": "YTMD not running"}),
-    }
+        .map_err(|_| "YTMD not running".to_string())?;
+    ytmd_json_response(response, "read player state").await
 }
 
-async fn yt_search(query: &str) -> Option<(String, String, String)> {
+async fn yt_search(query: &str) -> Result<(String, String, String), String> {
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
         .build()
-        .ok()?;
+        .map_err(|e| format!("Could not create YouTube search client: {e}"))?;
+
+    // YouTube changes these values periodically. Read the current values from
+    // the Music homepage instead of baking an obsolete web-client version in.
+    let homepage = client
+        .get("https://music.youtube.com/")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Could not open YouTube Music search: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("YouTube Music search homepage failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("Could not read YouTube Music search configuration: {e}"))?;
+    fn config_value(source: &str, key: &str) -> Option<String> {
+        let marker = format!("\"{key}\"");
+        let key_end = source.find(&marker)? + marker.len();
+        let colon = source[key_end..].find(':')? + key_end;
+        let quote = source[colon + 1..].find('"')? + colon + 1;
+        let start = quote + 1;
+        let end = source[start..].find('"')? + start;
+        Some(source[start..end].to_string())
+    }
+    let api_key = config_value(&homepage, "INNERTUBE_API_KEY")
+        .ok_or_else(|| "YouTube Music did not provide a search API key".to_string())?;
+    let client_version = config_value(&homepage, "INNERTUBE_CLIENT_VERSION")
+        .ok_or_else(|| "YouTube Music did not provide a web client version".to_string())?;
 
     let data: serde_json::Value = client
-        .post("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
+        .post(format!("https://music.youtube.com/youtubei/v1/search?key={api_key}&prettyPrint=false"))
         .json(&serde_json::json!({
             "query": query,
             "context": {
                 "client": {
                     "clientName": "WEB_REMIX",
-                    "clientVersion": "1.20231214.01.00",
+                    "clientVersion": client_version,
                     "hl": "en"
                 }
             }
@@ -353,99 +558,148 @@ async fn yt_search(query: &str) -> Option<(String, String, String)> {
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .ok()?
+        .map_err(|e| format!("YouTube Music search request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("YouTube Music search was rejected: {e}"))?
         .json()
         .await
-        .ok()?;
+        .map_err(|e| format!("YouTube Music returned invalid search data: {e}"))?;
 
-    let tabs = data["contents"]["tabbedSearchResultsRenderer"]["tabs"].as_array()?;
-    let sections = tabs.first()?["tabRenderer"]["content"]
-        ["sectionListRenderer"]["contents"]
-        .as_array()?;
-
-    for section in sections {
-        if let Some(items) = section["musicShelfRenderer"]["contents"].as_array() {
-            for item in items {
-                let r = &item["musicResponsiveListItemRenderer"];
-                // Try multiple paths — the primary `playlistItemData` path is absent on most
-                // search results; the overlay and navigationEndpoint paths are more reliable.
-                let vid = r["playlistItemData"]["videoId"].as_str()
-                    .or_else(|| r["overlay"]["musicItemThumbnailOverlayRenderer"]["content"]
-                        ["musicPlayButtonRenderer"]["playNavigationEndpoint"]
-                        ["watchEndpoint"]["videoId"].as_str())
-                    .or_else(|| r["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str());
-                if let Some(vid) = vid {
-                    let title = r["flexColumns"][0]
-                        ["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"][0]["text"]
-                        .as_str().unwrap_or("Unknown").to_string();
-                    let author = r["flexColumns"][1]
-                        ["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"][0]["text"]
-                        .as_str().unwrap_or("").to_string();
-                    return Some((vid.to_string(), title, author));
+    fn find_video_id(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(id) = object.get("videoId").and_then(|id| id.as_str()) {
+                    return Some(id);
                 }
+                object.values().find_map(find_video_id)
             }
+            serde_json::Value::Array(items) => items.iter().find_map(find_video_id),
+            _ => None,
         }
     }
-    None
-}
 
-fn songs_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..").join("songs")
-}
-
-async fn play_voicevox_song(song_name: &str) -> Result<(), String> {
-    if song_name.is_empty() || !song_name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-        return Err(format!("Invalid song name '{}'", song_name));
+    fn find_result(value: &serde_json::Value) -> Option<(String, String, String)> {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(renderer) = object.get("musicResponsiveListItemRenderer") {
+                    if let Some(video_id) = find_video_id(renderer) {
+                        let columns = renderer["flexColumns"].as_array();
+                        let column_text = |index: usize| {
+                            columns
+                                .and_then(|columns| columns.get(index))
+                                .and_then(|column| {
+                                    column["musicResponsiveListItemFlexColumnRenderer"]["text"]
+                                        ["runs"][0]["text"]
+                                        .as_str()
+                                })
+                                .unwrap_or("")
+                                .to_string()
+                        };
+                        let title = column_text(0);
+                        let author = column_text(1);
+                        return Some((
+                            video_id.to_string(),
+                            if title.is_empty() { "Unknown".to_string() } else { title },
+                            author,
+                        ));
+                    }
+                }
+                object.values().find_map(find_result)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(find_result),
+            _ => None,
+        }
     }
 
-    let host = std::env::var("VOICEVOX_HOST")
-        .unwrap_or_else(|_| "http://localhost:50021".to_string());
-    let speaker = std::env::var("VOICEVOX_SPEAKER")
-        .unwrap_or_else(|_| "46".to_string());
+    find_result(&data)
+        .ok_or_else(|| "YouTube Music search returned no playable results".to_string())
+}
 
-    let score_path = songs_dir().join(format!("{}.json", song_name));
-    let score_json = std::fs::read_to_string(&score_path)
-        .map_err(|_| format!("Song '{}' not found — add {}.json to the songs/ folder", song_name, song_name))?;
+async fn ytmd_json_response(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status.as_u16() == 401 {
+        return Err("NEEDS_PAIRING".to_string());
+    }
+    if !status.is_success() {
+        let detail = body.trim();
+        return Err(if detail.is_empty() {
+            format!("YTMD could not {operation}: HTTP {status}")
+        } else {
+            format!("YTMD could not {operation}: HTTP {status}: {detail}")
+        });
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| format!("YTMD returned invalid state data: {e}"))
+}
 
-    let client = reqwest::Client::new();
+async fn ytmd_command_response(
+    response: reqwest::Response,
+    command: &str,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status.as_u16() == 401 {
+        return Err("NEEDS_PAIRING".to_string());
+    }
+    if !status.is_success() {
+        let detail = body.trim();
+        return Err(if detail.is_empty() {
+            format!("YTMD rejected {command}: HTTP {status}")
+        } else {
+            format!("YTMD rejected {command}: HTTP {status}: {detail}")
+        });
+    }
+    Ok(serde_json::json!({"ok": true}))
+}
 
-    // Step 1: send score → get audio query
-    let audio_query: serde_json::Value = client
-        .post(format!("{}/sing_frame_audio_query?speaker={}", host, speaker))
-        .header("Content-Type", "application/json")
-        .body(score_json)
-        .timeout(std::time::Duration::from_secs(30))
+async fn require_change_video_support(
+    client: &reqwest::Client,
+    host: &str,
+) -> Result<(), String> {
+    let response = client
+        .get(format!("{}/metadata", host.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(2))
         .send()
         .await
-        .map_err(|_| "VoiceVox not reachable — is it running on port 50021?".to_string())?
+        .map_err(|_| "Could not read the YTMD version".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Could not read the YTMD version: HTTP {}", response.status()));
+    }
+    let metadata: serde_json::Value = response
         .json()
         .await
-        .map_err(|_| "VoiceVox returned an unexpected response for sing_frame_audio_query".to_string())?;
-
-    // Step 2: synthesise → get raw WAV bytes
-    let wav_bytes = client
-        .post(format!("{}/frame_synthesis?speaker={}", host, speaker))
-        .header("Content-Type", "application/json")
-        .json(&audio_query)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|_| "VoiceVox frame_synthesis request failed".to_string())?
-        .bytes()
-        .await
-        .map_err(|_| "Failed to read WAV bytes from VoiceVox".to_string())?;
-
-    // Step 3: play in a detached blocking thread so the command returns immediately
-    tokio::task::spawn_blocking(move || {
-        let Ok((_stream, handle)) = rodio::OutputStream::try_default() else { return; };
-        let Ok(sink) = rodio::Sink::try_new(&handle) else { return; };
-        let cursor = std::io::Cursor::new(wav_bytes);
-        let Ok(source) = rodio::Decoder::new(cursor) else { return; };
-        sink.append(source);
-        sink.sleep_until_end();
+        .map_err(|_| "YTMD returned invalid version metadata".to_string())?;
+    let Some(version) = metadata["appVersion"]
+        .as_str()
+        .or_else(|| metadata["version"].as_str())
+        .or_else(|| metadata["app"]["version"].as_str())
+    else {
+        // Some YTMD builds omit the application version from /metadata. The
+        // changeVideo command response remains the authoritative capability
+        // check, so do not misclassify an unknown version as 0.0.0.
+        return Ok(());
+    };
+    let mut parts = version.trim_start_matches('v').split('.').filter_map(|part| {
+        part.chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
     });
-
+    let parsed = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    if parsed < (2, 0, 6) {
+        return Err(format!(
+            "YTMD {version} cannot change songs; update YouTube Music Desktop App to 2.0.6 or newer"
+        ));
+    }
     Ok(())
 }
 
@@ -513,10 +767,7 @@ async fn ytmd_send(client: &reqwest::Client, host: &str, cmd: &str, token: &str)
         .send()
         .await
         .map_err(|_| "YTMD not reachable".to_string())?;
-    if res.status().as_u16() == 401 {
-        return Err("NEEDS_PAIRING".to_string());
-    }
-    Ok(serde_json::json!({"ok": true}))
+    ytmd_command_response(res, cmd).await
 }
 
 // Step 1: request a code from YTMD — triggers the Allow popup inside YTMD.
@@ -530,7 +781,7 @@ async fn pair_ytmd() -> Result<String, String> {
     let res: serde_json::Value = client
         .post(format!("{}/api/v1/auth/requestcode", host))
         .json(&serde_json::json!({
-            "appId": "pachan-overlay",
+            "appId": "pachanoverlay",
             "appName": "Pachan",
             "appVersion": "1.0.0"
         }))
@@ -550,7 +801,7 @@ async fn pair_ytmd() -> Result<String, String> {
 // Step 2: poll until the user clicks Allow in YTMD.
 // Call this after pair_ytmd() returns the code.
 #[tauri::command]
-async fn wait_ytmd_token(code: String) -> Result<(), String> {
+async fn wait_ytmd_token(code: String, paths: State<'_, RuntimePaths>) -> Result<(), String> {
     let host = std::env::var("YTMD_HOST")
         .unwrap_or_else(|_| "http://localhost:9863".to_string());
     let client = reqwest::Client::new();
@@ -558,14 +809,14 @@ async fn wait_ytmd_token(code: String) -> Result<(), String> {
     for _ in 0..120 {
         let resp = client
             .post(format!("{}/api/v1/auth/request", host))
-            .json(&serde_json::json!({"appId": "pachan-overlay", "code": &code}))
+            .json(&serde_json::json!({"appId": "pachanoverlay", "code": &code}))
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await;
         if let Ok(r) = resp {
             if let Ok(body) = r.json::<serde_json::Value>().await {
                 if let Some(token) = body["token"].as_str() {
-                    save_ytmd_token(token);
+                    save_ytmd_token(&paths, token);
                     return Ok(());
                 }
             }
@@ -577,27 +828,21 @@ async fn wait_ytmd_token(code: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn music_command(action: String, query: Option<String>) -> Result<serde_json::Value, String> {
+async fn music_command(action: String, query: Option<String>, paths: State<'_, RuntimePaths>) -> Result<serde_json::Value, String> {
     let query = query.unwrap_or_default();
-
-    // Singing uses VoiceVox locally — no YTMD token needed
-    if action == "sing" {
-        play_voicevox_song(&query).await?;
-        return Ok(serde_json::json!({"ok": true}));
-    }
 
     let host = std::env::var("YTMD_HOST")
         .unwrap_or_else(|_| "http://localhost:9863".to_string());
     ensure_ytmd_running(&host).await?;
 
-    let token = load_ytmd_token()
+    let token = load_ytmd_token(&paths)
         .ok_or_else(|| "NEEDS_PAIRING".to_string())?;
     let client = reqwest::Client::new();
 
     match action.as_str() {
         "search" => {
-            let (vid, title, author) = yt_search(&query).await
-                .ok_or_else(|| "No results found".to_string())?;
+            require_change_video_support(&client, &host).await?;
+            let (vid, title, author) = yt_search(&query).await?;
             let res = client.post(format!("{}/api/v1/command", host))
                 .header("Authorization", &token)
                 .json(&serde_json::json!({"command": "changeVideo", "data": {"videoId": vid}}))
@@ -605,27 +850,19 @@ async fn music_command(action: String, query: Option<String>) -> Result<serde_js
                 .send()
                 .await
                 .map_err(|_| "YTMD not reachable".to_string())?;
-            if res.status().as_u16() == 401 { return Err("NEEDS_PAIRING".to_string()); }
+            ytmd_command_response(res, "changeVideo").await?;
             Ok(serde_json::json!({"ok": true, "title": title, "author": author}))
         }
         "play" | "pause" => {
-            let status_res = client.get(format!("{}/api/v1/state", host))
+            let command = action.as_str();
+            let response = client.post(format!("{}/api/v1/command", host))
                 .header("Authorization", &token)
+                .json(&serde_json::json!({"command": command}))
                 .timeout(std::time::Duration::from_secs(2))
                 .send()
                 .await
                 .map_err(|_| "YTMD not reachable".to_string())?;
-            if status_res.status().as_u16() == 401 { return Err("NEEDS_PAIRING".to_string()); }
-            let status: serde_json::Value = status_res.json().await
-                .map_err(|_| "Parse error".to_string())?;
-            // trackState: 1 = playing, 0 or -1 = paused/stopped
-            let track_state = status["player"]["trackState"].as_i64().unwrap_or(0);
-            let is_playing = track_state == 1;
-            let needs_toggle = (action == "play" && !is_playing) || (action == "pause" && is_playing);
-            if needs_toggle {
-                ytmd_send(&client, &host, "playPause", &token).await?;
-            }
-            Ok(serde_json::json!({"ok": true}))
+            ytmd_command_response(response, command).await
         }
         "next"        => ytmd_send(&client, &host, "next",       &token).await,
         "previous"    => ytmd_send(&client, &host, "previous",   &token).await,
@@ -660,24 +897,46 @@ fn active_window() -> String {
 }
 
 fn main() {
-    let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".env");
-    let _ = dotenvy::from_path(env_path);
-
-    let initial_history = std::fs::read_to_string(history_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
-        .unwrap_or_default();
-
-    let initial_profile = std::fs::read_to_string(profile_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
     tauri::Builder::default()
-        .manage(ConversationHistory(Mutex::new(initial_history)))
-        .manage(UserProfile(Mutex::new(initial_profile)))
-        .invoke_handler(tauri::generate_handler![chat, reset_chat, cursor_position, active_window, take_screenshot, music_status, music_command, pair_ytmd, wait_ytmd_token])
+        .invoke_handler(tauri::generate_handler![chat, chat_stream, vision, get_settings, reset_chat, cursor_position, active_window, take_screenshot, music_status, music_command, pair_ytmd, wait_ytmd_token])
         .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            let config_dir = app.path().app_config_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            std::fs::create_dir_all(&config_dir)?;
+            // Existing process variables win, followed by per-user config,
+            // portable/executable config, then the development checkout.
+            let _ = dotenvy::from_path(config_dir.join(".env"));
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let _ = dotenvy::from_path(dir.join(".env"));
+                }
+            }
+
+            // Keep existing personal data on the first run after this migration.
+            let legacy_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+            let _ = dotenvy::from_path(legacy_root.join(".env"));
+            for filename in ["pachan_history.json", "user_profile.json", "ytmd_token.json"] {
+                let old = legacy_root.join(filename);
+                let new = data_dir.join(filename);
+                if old.is_file() && !new.exists() {
+                    let _ = std::fs::copy(old, new);
+                }
+            }
+
+            let paths = RuntimePaths { data_dir: data_dir.clone() };
+            let initial_history = std::fs::read_to_string(data_dir.join("pachan_history.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
+                .unwrap_or_default();
+            let initial_profile = std::fs::read_to_string(data_dir.join("user_profile.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            app.manage(paths);
+            app.manage(ConversationHistory(Mutex::new(initial_history)));
+            app.manage(UserProfile(Mutex::new(initial_profile)));
+
             let win = app.get_webview_window("main").unwrap();
 
             if let Ok(Some(monitor)) = win.current_monitor() {
@@ -726,4 +985,29 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error running Pachan overlay");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_accepts_known_controls() {
+        let parsed = parse_llm_response(
+            r#"{"reply":"Hi","emotion":"happy","motion":"nod","music":{"action":"play"}}"#,
+        );
+        assert_eq!(parsed["emotion"], "happy");
+        assert_eq!(parsed["motion"], "nod");
+        assert_eq!(parsed["music"]["action"], "play");
+    }
+
+    #[test]
+    fn parser_rejects_unknown_controls() {
+        let parsed = parse_llm_response(
+            r#"{"reply":"Hi","emotion":"invalid","motion":"launch","music":{"action":"run_program"}}"#,
+        );
+        assert_eq!(parsed["emotion"], "neutral");
+        assert!(parsed["motion"].is_null());
+        assert!(parsed["music"].is_null());
+    }
 }

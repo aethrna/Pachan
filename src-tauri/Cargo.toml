@@ -13,12 +13,11 @@ tauri-build = { version = "2", features = [] }
 tauri      = { version = "2", features = ["tray-icon"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest    = { version = "0.12", features = ["json"] }
+reqwest    = { version = "0.12", features = ["json", "stream"] }
 tokio      = { version = "1", features = ["time"] }
 dotenvy    = "0.15"
 png        = "0.17"
 base64     = "0.22"
-rodio      = { version = "0.17", default-features = false, features = ["symphonia-wav"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "wingdi", "windef"] }

@@ -11,10 +11,10 @@ fi
 echo ""
 echo "  Pachan AI Live2D"
 echo "  ─────────────────────────────"
-echo "  Local:  http://localhost:8000"
+echo "  Local:  http://127.0.0.1:8000"
 echo ""
 echo "  For desktop overlay (run in Windows cmd/PowerShell):"
 echo '  "C:\Program Files\Google\Chrome\Application\chrome.exe" --app=http://localhost:8000 --window-size=400,600 --window-position=1500,100'
 echo ""
 
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload

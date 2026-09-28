@@ -342,15 +342,15 @@
       document.body.classList.add('overlay');
     }
   </script>
-  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script src="./vendor/live2dcubismcore.min.js"></script>
   <!-- PixiJS v6 -->
-  <script src="https://unpkg.com/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <script src="./vendor/pixi.min.js"></script>
   <!-- pixi-live2d-display -->
-  <script src="https://unpkg.com/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+  <script src="./vendor/cubism4.min.js"></script>
 
   <script>
   (async () => {
-    const MODEL_URL = './model/pachirisu%20anime%20girl%20-%20top%20half.model3.json';
+    const MODEL_URL = '/model/pachan.model3.json';
 
     // ── Parameter targets per emotion ──────────────────────────────────────
     const EMOTIONS = {
@@ -577,7 +577,10 @@
     try {
       model = await PIXI.live2d.Live2DModel.from(MODEL_URL, { autoInteract: false });
     } catch (e) {
-      document.getElementById('status').textContent = 'model load failed: ' + e.message;
+      const detail = [e.message, e.status ? `HTTP ${e.status}` : '', e.url || '']
+        .filter(Boolean)
+        .join(' · ');
+      document.getElementById('status').textContent = 'model load failed: ' + detail;
       console.error(e);
       return;
     }
@@ -986,6 +989,42 @@
       });
     }
 
+    async function sendMessageStreamTauri(text) {
+      let rawBuffer = '';
+      let partialReply = '';
+      let finalData = null;
+      const onEvent = new window.__TAURI__.core.Channel();
+
+      onEvent.onmessage = evt => {
+        if (evt.event === 'chunk' && evt.content) {
+          rawBuffer += evt.content;
+          const partial = extractPartialReply(rawBuffer);
+          if (partial !== null && partial !== partialReply) {
+            partialReply = partial;
+            bubble.textContent = partial || '...';
+          }
+        } else if (evt.event === 'done') {
+          finalData = evt.data;
+        }
+      };
+
+      await window.__TAURI__.core.invoke('chat_stream', {
+        message: text,
+        onEvent,
+      });
+      if (!finalData?.reply) throw new Error('The streamed response did not finish correctly.');
+
+      chatEmotion = finalData.emotion || 'neutral';
+      if (finalData.overlay) handleOverlay(finalData.overlay);
+      if (finalData.motion) playMotion(finalData.motion);
+      if (finalData.music) handleMusicCommand(finalData.music);
+      statusEl.textContent = 'ready';
+      speak(finalData.reply, {
+        onStart: () => { bubble.textContent = finalData.reply; },
+        onEnd: () => { scheduleIdle(); },
+      });
+    }
+
     async function sendMessage(overrideText) {
       const text = overrideText ?? msgInput.value.trim();
       if (!text) return;
@@ -1004,16 +1043,20 @@
 
       try {
         if (window.__TAURI__) {
-          const data = await window.__TAURI__.core.invoke('chat', { message: text });
-          chatEmotion = data.emotion || 'neutral';
-          if (data.overlay) handleOverlay(data.overlay);
-          if (data.motion) playMotion(data.motion);
-          if (data.music)  handleMusicCommand(data.music);
-          statusEl.textContent = 'ready';
-          speak(data.reply, {
-            onStart: () => { bubble.textContent = data.reply; },
-            onEnd:   () => { scheduleIdle(); },
-          });
+          if (settings.streaming) {
+            await sendMessageStreamTauri(text);
+          } else {
+            const data = await window.__TAURI__.core.invoke('chat', { message: text });
+            chatEmotion = data.emotion || 'neutral';
+            if (data.overlay) handleOverlay(data.overlay);
+            if (data.motion) playMotion(data.motion);
+            if (data.music)  handleMusicCommand(data.music);
+            statusEl.textContent = 'ready';
+            speak(data.reply, {
+              onStart: () => { bubble.textContent = data.reply; },
+              onEnd:   () => { scheduleIdle(); },
+            });
+          }
         } else if (settings.streaming) {
           await sendMessageStream(text);
         } else {
@@ -1296,6 +1339,29 @@
     const nowPlayingEl = document.getElementById('now-playing');
     let lastTrackId    = null;
 
+    function musicErrorMessage(error) {
+      const detail = String(error).replace(/^Error:\s*/, '');
+      if (detail.includes('YTMD not running') || detail.includes('YTMD not reachable')) {
+        return 'YouTube Music Desktop is not running or its Companion Server is disabled.';
+      }
+      if (detail.includes('no playable results')) {
+        return "I couldn't find a playable match. Try including both the song and artist.";
+      }
+      if (detail.includes('timed out')) {
+        return 'YouTube Music took too long to respond. Please try again.';
+      }
+      return detail;
+    }
+
+    const musicActionFeedback = {
+      play: 'Music resumed',
+      pause: 'Music paused',
+      next: 'Skipped to the next track',
+      previous: 'Returned to the previous track',
+      volume_up: 'Music volume raised',
+      volume_down: 'Music volume lowered',
+    };
+
     async function handleMusicCommand(music) {
       if (!music?.action) return;
       if (music.action === 'search') {
@@ -1319,7 +1385,12 @@
           nowPlayingEl.textContent = `♪ ${result.title} — ${result.author || ''}`;
           nowPlayingEl.classList.add('active');
         }
-        statusEl.textContent = 'ready';
+        statusEl.textContent = musicActionFeedback[music.action] || 'ready';
+        if (music.action !== 'search') {
+          setTimeout(() => {
+            if (!sendBtn.disabled) statusEl.textContent = 'ready';
+          }, 1800);
+        }
         // Poll for live state after a short delay so the track has time to load
         if (music.action === 'search') setTimeout(pollNowPlaying, 3000);
       } catch (e) {
@@ -1342,14 +1413,14 @@
             chatEmotion = 'sad';
             setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 6000);
           }
-        } else if (msg.includes('No results found')) {
-          bubble.textContent = `I couldn't find that song on YouTube Music! Try a different search.`;
+        } else if (msg.includes('no playable results')) {
+          bubble.textContent = musicErrorMessage(e);
           bubble.classList.add('visible');
           chatEmotion = 'sad';
           setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 4000);
         } else {
           console.error('Music command failed:', e);
-          bubble.textContent = 'Hmm, I couldn\'t reach YouTube Music! Is it installed and is the Companion Server enabled?';
+          bubble.textContent = `Music error: ${musicErrorMessage(e)}`;
           bubble.classList.add('visible');
           chatEmotion = 'sad';
           setTimeout(() => { if (!sendBtn.disabled) scheduleIdle(); }, 4000);
@@ -1367,11 +1438,16 @@
           if (!res.ok) return;
           data = await res.json();
         }
-        if (data.error || !data.track?.id) { nowPlayingEl.classList.remove('active'); return; }
+        if (data.error || !data.video?.id) { nowPlayingEl.classList.remove('active'); return; }
 
-        const { track, player } = data;
+        const player = data.player || {};
+        const track = {
+          id: data.video.id,
+          title: data.video.title || 'Unknown',
+          author: data.video.author || '',
+        };
         nowPlayingEl.textContent = `♪ ${track.title} — ${track.author}`;
-        nowPlayingEl.classList.toggle('active', !player?.isPaused);
+        nowPlayingEl.classList.toggle('active', player.trackState === 1);
 
         if (track.id !== lastTrackId) {
           const prev = lastTrackId;
@@ -1438,13 +1514,10 @@
         bubble.classList.add('visible');
         chatEmotion = 'neutral';
 
-        const res = await fetch('/vision', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ screenshot, window_title: windowTitle || '' }),
+        const data = await window.__TAURI__.core.invoke('vision', {
+          screenshot,
+          windowTitle: windowTitle || '',
         });
-        if (!res.ok) { chatEmotion = null; bubble.classList.remove('visible'); return; }
-        const data = await res.json();
 
         chatEmotion = data.emotion || 'neutral';
         if (data.motion) playMotion(data.motion);
@@ -1520,7 +1593,10 @@
     populateVoices();
     speechSynthesis.addEventListener('voiceschanged', populateVoices);
 
-    fetch('/settings').then(r => r.json()).then(d => {
+    const settingsRequest = window.__TAURI__
+      ? window.__TAURI__.core.invoke('get_settings')
+      : fetch('/settings').then(r => r.json());
+    settingsRequest.then(d => {
       spModelName.textContent = d.model || '';
       if (!d.vision_model) spVision.disabled = true; // grey out if not configured
     }).catch(() => {});

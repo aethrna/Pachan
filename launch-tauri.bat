@@ -2,7 +2,7 @@
 REM ── Pachan Tauri Overlay ─────────────────────────────────────────────────
 REM Requires: Rust + cargo installed on Windows
 REM First run will compile (~2 min). Subsequent runs are instant.
-REM The Python server (start.sh) must be running first.
+REM The Tauri app is self-contained; the Python browser server is not required.
 
 cd /d C:\VT\src-tauri
 
